@@ -1,35 +1,50 @@
+# app/main.py
 import os, zipfile, re, shutil, time, math, json, traceback
 from datetime import datetime, timedelta
 from typing import Optional
+
 from fastapi import FastAPI, Request, UploadFile, File, Form, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, PlainTextResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
+
 from sqlalchemy import create_engine, Column, String, Integer, Boolean, DateTime, Text, select
 from sqlalchemy.orm import sessionmaker, declarative_base
+
 from passlib.hash import bcrypt
 import pandas as pd
 
 # -------- 基本路径 --------
 BASE_DIR = os.environ.get("HUANDAN_BASE", os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 DATA_DIR = os.environ.get("HUANDAN_DATA", "/opt/huandan-data")
-PDF_DIR  = os.path.join(DATA_DIR, "pdfs")
-UP_DIR   = os.path.join(DATA_DIR, "uploads")
+
+PDF_DIR = os.path.join(DATA_DIR, "pdfs")
+UP_DIR  = os.path.join(DATA_DIR, "uploads")
 os.makedirs(PDF_DIR, exist_ok=True)
 os.makedirs(UP_DIR,  exist_ok=True)
+
+# 确保静态/更新/运行时目录存在（防止导入时报错）
+os.makedirs(os.path.join(BASE_DIR, "app", "static"), exist_ok=True)
+os.makedirs(os.path.join(BASE_DIR, "app", "templates"), exist_ok=True)
+os.makedirs(os.path.join(BASE_DIR, "updates"), exist_ok=True)
+os.makedirs(os.path.join(BASE_DIR, "runtime"), exist_ok=True)
 
 # -------- 应用/挂载 --------
 app = FastAPI(title="换单服务端")
 app.add_middleware(SessionMiddleware, secret_key=os.environ.get("SECRET_KEY","huandan-secret-key"))
-app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "app", "static")), name="static")
-os.makedirs(os.path.join(BASE_DIR,"updates"), exist_ok=True)
-app.mount("/updates", StaticFiles(directory=os.path.join(BASE_DIR,"updates")), name="updates")
-app.mount("/runtime", StaticFiles(directory=os.path.join(BASE_DIR,"runtime")), name="runtime")
+
+app.mount("/static",  StaticFiles(directory=os.path.join(BASE_DIR, "app", "static")),  name="static")
+app.mount("/updates", StaticFiles(directory=os.path.join(BASE_DIR, "updates")),       name="updates")
+app.mount("/runtime", StaticFiles(directory=os.path.join(BASE_DIR, "runtime")),       name="runtime")
+
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "app", "templates"))
 
 # -------- 数据库 --------
-engine = create_engine(f"sqlite:///{os.path.join(BASE_DIR,'huandan.sqlite3')}", connect_args={"check_same_thread": False})
+engine = create_engine(
+    f"sqlite:///{os.path.join(BASE_DIR,'huandan.sqlite3')}",
+    connect_args={"check_same_thread": False}
+)
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 Base = declarative_base()
 
@@ -73,18 +88,19 @@ Base.metadata.create_all(bind=engine)
 
 # -------- 工具函数 --------
 def now_iso(): return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
 def to_iso(dt: Optional[datetime]) -> str:
     if not dt: return ""
     try: return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     except Exception: return ""
 
-# —— 统一“运单号规范化”：Excel/上传PDF/映射输出/下载兜底一致 ——
+# 统一“运单号规范化”
 def canon_tracking(s: str) -> str:
     s = (s or "").strip()
-    s = re.sub(r"[^A-Za-z0-9_.-]+", "_", s)   # 非法字符→_
-    s = re.sub(r"_+", "_", s)                 # 连续_压缩
-    s = s.strip("._")                         # 去左右 . _
-    return s[:128]                            # 长度限制
+    s = re.sub(r"[^A-Za-z0-9_.-]+", "_", s)  # 非法字符→_
+    s = re.sub(r"_+", "_", s)                # 连续_压缩
+    s = s.strip("._")                        # 去左右 . _
+    return s[:128]
 
 def get_db():
     db = SessionLocal()
@@ -97,17 +113,20 @@ def get_kv(db, key, default=""):
 
 def set_kv(db, key, value):
     obj = db.get(MetaKV, key)
-    if not obj: obj = MetaKV(key=key, value=str(value)); db.add(obj)
-    else: obj.value = str(value)
+    if not obj:
+        obj = MetaKV(key=key, value=str(value)); db.add(obj)
+    else:
+        obj.value = str(value)
     db.commit()
 
 def set_mapping_version(db): set_kv(db, "mapping_version", now_iso())
 def get_mapping_version(db):
     v = get_kv(db, "mapping_version", "")
-    if not v: set_mapping_version(db); v = get_kv(db,"mapping_version","")
+    if not v:
+        set_mapping_version(db); v = get_kv(db,"mapping_version","")
     return v
 
-# --- 并集映射（订单 ∪ PDF）---
+# 并集映射：订单 ∪ PDF
 def _build_mapping_payload(db):
     map_rows = db.query(OrderMapping).all()
     file_rows = db.query(TrackingFile).all()
@@ -116,8 +135,7 @@ def _build_mapping_payload(db):
     for r in map_rows:
         tn_norm = canon_tracking(r.tracking_no or "")
         tf = tf_by_tn.get(tn_norm) or tf_by_tn.get(r.tracking_no or "")
-        u = None
-        if r.updated_at: u = r.updated_at
+        u = r.updated_at
         if tf and tf.uploaded_at: u = max([x for x in (u, tf.uploaded_at) if x is not None])
         payload.append({"order_id": r.order_id, "tracking_no": tn_norm, "updated_at": to_iso(u)})
         seen.add(tn_norm)
@@ -134,7 +152,8 @@ def write_mapping_json(db):
     with open(fp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-def is_locked(c: ClientAuth) -> bool: return bool(c.locked_until and datetime.utcnow() < c.locked_until)
+def is_locked(c: ClientAuth) -> bool:
+    return bool(c.locked_until and datetime.utcnow() < c.locked_until)
 
 def verify_code(db, code: str):
     if not code or not code.isdigit() or len(code)!=6: return None
@@ -160,7 +179,8 @@ def cleanup_expired(db):
         for r in olds:
             try:
                 if r.file_path and os.path.exists(r.file_path): os.remove(r.file_path)
-            except Exception: pass
+            except Exception:
+                pass
             db.delete(r)
     db.commit()
 
@@ -346,6 +366,7 @@ def file_batch_delete_all(request: Request, q: str = Form(""), db=Depends(get_db
 @app.get("/admin/file/{tracking_no}")
 def admin_file_download(tracking_no: str, request: Request, db=Depends(get_db)):
     require_admin(request, db)
+    # 与 API 下载同兜底：原串→规范化→大小写不敏感
     def _find(tr):
         cand = [tr, canon_tracking(tr)]
         for t in cand:
@@ -379,7 +400,7 @@ def orders_batch_delete_all(request: Request, q: str = Form(""), db=Depends(get_
     db.commit(); set_mapping_version(db); write_mapping_json(db)
     return RedirectResponse(f"/admin/orders?q={q}", status_code=302)
 
-# ---- 客户端访问码管理 ----
+# ---- 客户端访问码 ----
 @app.get("/admin/clients", response_class=HTMLResponse)
 def clients_page(request: Request, db=Depends(get_db)):
     require_admin(request, db)
@@ -435,7 +456,7 @@ def settings_save(request: Request,
     cleanup_expired(db)
     return RedirectResponse("/admin", status_code=302)
 
-# ------------------ 对齐 ------------------
+# ---- 对齐：后台列表 ≡ 磁盘 pdfs/ ----
 @app.post("/admin/reconcile")
 def admin_reconcile(request: Request, db=Depends(get_db)):
     require_admin(request, db)
@@ -462,7 +483,7 @@ def admin_reconcile(request: Request, db=Depends(get_db)):
     set_mapping_version(db); write_mapping_json(db)
     return RedirectResponse(f"/admin/files?reconciled=1&added={added}&renamed={renamed}&dropped={drop}", status_code=302)
 
-# ------------------ API（客户端） ------------------
+# ------------------ API（客户端使用） ------------------
 @app.get("/api/v1/version")
 def api_version(code: str = Query(""), db=Depends(get_db)):
     c = verify_code(db, code)
@@ -480,6 +501,7 @@ def api_mapping(code: str = Query(""), db=Depends(get_db)):
     if not c: raise HTTPException(status_code=403, detail="invalid code")
     return _build_mapping_payload(db)
 
+# 文件下载：原串→规范化→大小写不敏感兜底
 @app.get("/api/v1/file/{tracking_no}")
 def api_file(tracking_no: str, code: str = Query(""), db=Depends(get_db)):
     c = verify_code(db, code)
