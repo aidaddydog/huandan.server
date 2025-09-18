@@ -19,7 +19,7 @@
             <button class="primary">一键拉取并应用更新</button>
           </form>
         {% else %}
-          <div class="muted">已是最新。</div>
+          <div class="muted">当前已是最新。</div>
         {% endif %}
       </div>
     </div>
@@ -30,7 +30,7 @@
 
 <div class="card">
   <h3>官方一键升级脚本</h3>
-  <p>如遇复杂环境，推荐直接执行：</p>
+  <p>如遇复杂环境，直接执行：</p>
   <pre class="code">bash &lt;(curl -fsSL https://raw.githubusercontent.com/aidaddydog/huandan.server/main/scripts/bootstrap_online.sh)</pre>
 </div>
 {% endblock %}
