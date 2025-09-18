@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
+# scripts/install_root.sh
 # Huandan Server 极简一键部署（root 直接运行服务）
-# 用途：追求一步到位，少出错。安全性弱于专用用户方案。
-
 set -Eeuo pipefail
 
 # ===== 可调变量 =====
-REPO="${REPO:-}"                    # 首次部署或想强制从 Git 拉取时填：https://github.com/<owner>/<repo>.git
+REPO="${REPO:-}"                    # 首次部署或想强制从 Git 拉取时：https://github.com/<owner>/<repo>.git
 BRANCH="${BRANCH:-main}"
 BASE="${BASE:-/opt/huandan-server}" # 代码目录
 DATA="${DATA:-/opt/huandan-data}"   # 数据目录（pdfs/uploads）
@@ -25,14 +24,15 @@ mkdir -p "$LOG_DIR" "$BACKUP_ROOT"
 exec > >(tee -a "$INSTALL_LOG") 2>&1
 
 step(){ echo "==> $*"; }
+is_empty_dir(){ [ -z "$(ls -A "$1" 2>/dev/null)" ]; }
 
 step "1) 安装依赖"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y --no-install-recommends git curl ca-certificates tzdata python3-venv python3-pip rsync unzip ufw
 
-step "2) 目录就绪"
-install -d -m 755 "$BASE" "$DATA/pdfs" "$DATA/uploads"
+step "2) 目录就绪（含 runtime/ updates/）"
+install -d -m 755 "$BASE" "$BASE/runtime" "$BASE/updates" "$DATA/pdfs" "$DATA/uploads"
 
 step "3) 备份策略：$AUTO_CLEAN"
 if [ "$AUTO_CLEAN" = "yes" ] && [ -d "$BASE" ]; then
@@ -40,12 +40,11 @@ if [ "$AUTO_CLEAN" = "yes" ] && [ -d "$BASE" ]; then
   mkdir -p "$BACKUP_DIR"
   rsync -a --delete --exclude='.venv' "$BASE/" "$BACKUP_DIR/huandan-server/" 2>/dev/null || true
   rsync -a "$DATA/" "$BACKUP_DIR/huandan-data/" 2>/dev/null || true
-  rm -rf "$BASE" && mkdir -p "$BASE"
+  rm -rf "$BASE" && mkdir -p "$BASE" "$BASE/runtime" "$BASE/updates"
   echo "已备份到：$BACKUP_DIR，并覆盖安装"
 fi
 
 step "4) 获取/更新代码"
-is_empty_dir(){ [ -z "$(ls -A "$1" 2>/dev/null)" ]; }
 if [ -d "$BASE/.git" ]; then
   (cd "$BASE" && git fetch --all --prune && (git checkout "$BRANCH" 2>/dev/null || true) && git pull --ff-only || true)
 elif [ -n "${REPO}" ]; then
@@ -96,7 +95,8 @@ systemctl daemon-reload
 systemctl enable --now huandan.service
 systemctl --no-pager -l status huandan.service | sed -n '1,60p'
 
-step "7) 重建 mapping.json（修正 sys.path）"
+step "7) 重建 mapping.json（修正 sys.path，兜底创建目录）"
+mkdir -p "$BASE/runtime" "$BASE/updates"
 env BASE="$BASE" HUANDAN_DATA="$DATA" "$BASE/.venv/bin/python" - <<'PY'
 import os, sys
 base = os.environ['BASE']
