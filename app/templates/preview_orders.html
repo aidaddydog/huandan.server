@@ -1,0 +1,14 @@
+{% extends "layout.html" %}{% block content %}
+<div class="title-row">
+  <form method="post" action="/admin/upload-orders-step3">
+    <button type="submit" class="primary">确认上传</button>
+  </form>
+  <h2>预览（步骤3/3：确认写入）</h2>
+</div>
+<table class="table">
+  <thead><tr><th>#</th><th>订单</th><th>运单</th></tr></thead>
+  <tbody>
+  {% for r in rows %}<tr><td>{{loop.index}}</td><td>{{r[0]}}</td><td>{{r[1]}}</td></tr>{% endfor %}
+  </tbody>
+</table>
+{% endblock %}
