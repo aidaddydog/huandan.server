@@ -1,5 +1,9 @@
 {% extends "layout.html" %}{% block content %}
 <h2>订单列表</h2>
+<form method="post" action="/admin/danger/wipe_orders" class="row" onsubmit="return confirm('⚠️ 危险操作：将删除全部订单映射（不影响 PDF 文件）。确定继续？')">
+  <input name="confirm" placeholder="输入 DELETE ALL ORDERS 以确认" style="flex:1">
+  <button type="submit" class="danger">危险：清空全部订单映射</button>
+</form>
 <form method="get" class="row">
   <input name="q" value="{{q or ''}}" placeholder="按订单搜索"><button type="submit">查询</button>
 </form>
