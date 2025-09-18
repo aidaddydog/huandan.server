@@ -21,6 +21,22 @@ try:
 except Exception:
     pass
 
+# 为 HTML 预览提供默认上下文，避免模板缺变量报错
+def _preview_ctx(request):
+    return {
+        "request": request,
+        "preview": True,
+        # 常见模板会用到的字段给出无害默认值
+        "stats": {
+            "order_count": 0, "file_count": 0, "client_count": 0,
+            "version": "preview", "server_version": "preview", "client_recommend": "",
+            "o_days": "30", "f_days": "30",
+        },
+        "rows": [], "files": [], "columns": [],
+        "q": "", "page": 1, "pages": 1, "total": 0, "page_size": 100,
+        "err": "", "error": "",
+    }
+
 router = APIRouter()
 
 # ==== 友好中文名映射（找不到时再用）====
@@ -214,25 +230,41 @@ def templates_save(request: Request, kind: str = Form(...), path: str = Form(...
     return RedirectResponse(f"/admin/templates/edit?kind={kind}&path={path}&saved=1", status_code=302)
 
 # ------------------ 预览（基于已保存的文件） ------------------
-@router.get("/admin/templates/preview")
-def templates_preview(kind: str = Query(..., pattern="^(tpl|static)$"), path: str = Query(...)):
+from fastapi import Request  # 确保文件顶部有导入
+
+@router.get("/admin/templates/preview", response_class=HTMLResponse)
+def templates_preview(request: Request, kind: str = Query(..., pattern="^(tpl|static)$"), path: str = Query(...)):
     abs_p = _safe_abs(kind, path)
+    if not os.path.exists(abs_p):
+        raise HTTPException(status_code=404, detail="模板不存在")
+
     ext = os.path.splitext(abs_p)[1].lower()
     if kind == "tpl" and ext == ".html":
-        # 用 Jinja 真实渲染（如模板需要额外上下文，这里只提供 request/preview 标志）
-        from fastapi import Request as _Req
-        class _FakeReq(_Req):
-            scope={"type":"http"}
-        req=_FakeReq({})
-        return templates.TemplateResponse(path, {"request": req, "preview": True})
-    elif kind == "static" and ext in {".css",".js"}:
+        # 用真实的 request + 默认上下文渲染，避免模板缺变量报错
+        ctx = _preview_ctx(request)
+        try:
+            return templates.TemplateResponse(path, ctx)
+        except Exception as e:
+            # 兜底：显示错误原因 + 原始模板，方便排查
+            raw = open(abs_p, "r", encoding="utf-8", errors="ignore").read()
+            def esc(s): return s.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+            html = f"""<!doctype html><meta charset="utf-8"><title>预览失败</title>
+            <h3>渲染出错</h3><pre>{esc(str(e))}</pre>
+            <h3>原始模板</h3><pre style="white-space:pre-wrap">{esc(raw)}</pre>"""
+            return HTMLResponse(content=html, status_code=200)
+
+    if kind == "static" and ext in {".css",".js"}:
         rel = path
         if ext == ".css":
-            html = f'<!doctype html><meta charset="utf-8"><title>CSS 预览</title><link rel="stylesheet" href="/static/{rel}"><div style="padding:16px">CSS 已加载（可切换到实际页面查看效果）。</div>'
+            html = f'<!doctype html><meta charset="utf-8"><title>CSS 预览</title>' \
+                   f'<link rel="stylesheet" href="/static/{rel}"><div style="padding:16px">CSS 已加载（可在实际页面查看最终效果）。</div>'
         else:
-            html = f'<!doctype html><meta charset="utf-8"><title>JS 预览</title><script src="/static/{rel}"></script><div style="padding:16px">JS 已加载（输出请看控制台）。</div>'
-        return Response(content=html, media_type="text/html; charset=utf-8")
-    return Response("暂不支持此类型预览", media_type="text/plain; charset=utf-8")
+            html = f'<!doctype html><meta charset="utf-8"><title>JS 预览</title>' \
+                   f'<script src="/static/{rel}"></script><div style="padding:16px">JS 已加载（输出看控制台）。</div>'
+        return HTMLResponse(content=html, status_code=200)
+
+    return PlainTextResponse("暂不支持此类型预览", status_code=400)
+
 
 # ------------------ 一键回传到仓库（git add/commit/push） ------------------
 @router.post("/admin/templates/git_push")
