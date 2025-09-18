@@ -41,6 +41,13 @@ app.mount("/runtime", StaticFiles(directory=os.path.join(BASE_DIR, "runtime")), 
 
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "app", "templates"))
 
+templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "app", "templates"))
+# 让模板改动无需重启即可生效
+try:
+    templates.env.auto_reload = True
+except Exception:
+    pass
+
 # —— 启动时初始化数据库（避免并发重复建表） ——
 @app.on_event("startup")
 def _init_db():
