@@ -255,6 +255,131 @@ def dashboard(request: Request, db=Depends(get_db)):
     }
     return templates.TemplateResponse("dashboard.html", {"request": request, "stats": stats})
 
+# ------------------ 工具：执行命令 ------------------
+def run_cmd(cmd: str, cwd: Optional[str] = None, timeout: int = 60):
+    p = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    return p.returncode, (p.stdout or "").strip(), (p.stderr or "").strip()
+
+def git_status_info(base: str):
+    repo = base
+    git_dir = os.path.join(repo, ".git")
+    if not os.path.isdir(git_dir):
+        return {"mode": "nogit"}
+    info = {"mode": "git", "repo": repo}
+    # 允许失败但不抛异常
+    _, branch, _ = run_cmd("git rev-parse --abbrev-ref HEAD", cwd=repo)
+    _, origin, _ = run_cmd("git remote get-url origin", cwd=repo)
+    run_cmd("git fetch --all --prune", cwd=repo)
+    _, counts, _ = run_cmd(f"git rev-list --left-right --count HEAD...origin/{branch}", cwd=repo)
+    ahead = behind = 0
+    if counts:
+        parts = counts.replace("\t"," ").split()
+        if len(parts)>=2:
+            # 左=本地独有（ahead），右=远端独有（behind）
+            ahead, behind = int(parts[0]), int(parts[1])
+    _, local_log, _  = run_cmd('git log -1 --date=iso --pretty=format:"%h %cd %s"', cwd=repo)
+    _, remote_log, _ = run_cmd(f'git log -1 origin/{branch} --date=iso --pretty=format:"%h %cd %s"', cwd=repo)
+    info.update({
+        "branch": branch or "",
+        "origin": origin or "",
+        "ahead": ahead,
+        "behind": behind,
+        "local": local_log.strip('"'),
+        "remote": remote_log.strip('"'),
+    })
+    return info
+
+# ------------------ 在线升级（仅管理员） ------------------
+@app.get("/admin/update", response_class=HTMLResponse)
+def update_page(request: Request, db=Depends(get_db)):
+    require_admin(request, db)
+    info = git_status_info(BASE_DIR)
+    # 构造一条安全的一键升级命令（你原来那条仍有效）
+    oneliner = "bash <(curl -fsSL https://raw.githubusercontent.com/aidaddydog/huandan.server/main/scripts/bootstrap_online.sh)"
+    return templates.TemplateResponse("update.html", {"request": request, "info": info, "oneliner": oneliner})
+
+@app.post("/admin/update/git_pull")
+def update_git_pull(request: Request, db=Depends(get_db)):
+    require_admin(request, db)
+    # 仅在 .git 存在时允许后台一键拉取更新 + 重新执行安装脚本
+    if not os.path.isdir(os.path.join(BASE_DIR, ".git")):
+        raise HTTPException(status_code=400, detail="当前目录不是 git 仓库，无法 git pull")
+    # 1) 拉取
+    cmds = [
+        "git fetch --all --prune",
+        "git checkout $(git rev-parse --abbrev-ref HEAD) || true",
+        "git reset --hard origin/$(git rev-parse --abbrev-ref HEAD)",
+        "git clean -fd"
+    ]
+    for c in cmds:
+        rc, out, err = run_cmd(c, cwd=BASE_DIR)
+        if rc != 0:
+            return PlainTextResponse(f"更新失败：{c}\n\n{out}\n{err}", status_code=500)
+    # 2) 调用仓库安装脚本（会重写 systemd 与依赖；幂等）
+    rc, out, err = run_cmd(f"bash {shlex.quote(os.path.join(BASE_DIR,'scripts','install_root.sh'))}", cwd=BASE_DIR, timeout=1800)
+    if rc != 0:
+        return PlainTextResponse(f"install 脚本执行失败：\n{out}\n{err}", status_code=500)
+    return RedirectResponse("/admin/update?ok=1", status_code=302)
+
+# ------------------ 模板编辑器（仅管理员） ------------------
+TEMPLATE_ROOT = os.path.join(BASE_DIR, "app", "templates")
+
+def _safe_template_rel(path: str) -> str:
+    p = (path or "").replace("\\", "/").lstrip("/")
+    if ".." in p or not p.endswith(".html"):
+        raise HTTPException(status_code=400, detail="非法模板路径")
+    return p
+
+def _safe_template_abs(path: str) -> str:
+    rel = _safe_template_rel(path)
+    abs_path = os.path.abspath(os.path.join(TEMPLATE_ROOT, rel))
+    if not abs_path.startswith(os.path.abspath(TEMPLATE_ROOT)+os.sep) and abs_path != os.path.abspath(TEMPLATE_ROOT):
+        raise HTTPException(status_code=400, detail="非法模板路径")
+    return abs_path
+
+def _list_templates():
+    out = []
+    for root, _, files in os.walk(TEMPLATE_ROOT):
+        for f in files:
+            if f.endswith(".html"):
+                abs_p = os.path.join(root, f)
+                rel_p = os.path.relpath(abs_p, TEMPLATE_ROOT).replace("\\","/")
+                out.append(rel_p)
+    out.sort()
+    return out
+
+@app.get("/admin/templates", response_class=HTMLResponse)
+def templates_list(request: Request, db=Depends(get_db)):
+    require_admin(request, db)
+    files = _list_templates()
+    return templates.TemplateResponse("templates_list.html", {"request": request, "files": files})
+
+@app.get("/admin/templates/edit", response_class=HTMLResponse)
+def templates_edit(request: Request, path: str, db=Depends(get_db)):
+    require_admin(request, db)
+    abs_p = _safe_template_abs(path)
+    if not os.path.exists(abs_p):
+        raise HTTPException(status_code=404, detail="模板不存在")
+    content = open(abs_p, "r", encoding="utf-8").read()
+    return templates.TemplateResponse("templates_edit.html", {"request": request, "path": path, "content": content})
+
+@app.post("/admin/templates/save")
+def templates_save(request: Request, path: str = Form(...), content: str = Form(...), db=Depends(get_db)):
+    require_admin(request, db)
+    abs_p = _safe_template_abs(path)
+    # 先备份一份
+    backup_dir = os.path.join(BASE_DIR, "updates", "template-backups", datetime.utcnow().strftime("%Y%m%d-%H%M%S"))
+    os.makedirs(os.path.join(backup_dir, os.path.dirname(path)), exist_ok=True)
+    if os.path.exists(abs_p):
+        shutil.copy2(abs_p, os.path.join(backup_dir, path))
+    # 保存
+    os.makedirs(os.path.dirname(abs_p), exist_ok=True)
+    with open(abs_p, "w", encoding="utf-8") as f:
+        f.write(content)
+    # 让 jinja 变更立即可见（auto_reload 已启）
+    return RedirectResponse(f"/admin/templates/edit?path={path}&saved=1", status_code=302)
+
+
 # ---- 导入订单（3步：文件→列映射→预览与确认） ----
 @app.get("/admin/upload-orders", response_class=HTMLResponse)
 def upload_orders_page(request: Request, db=Depends(get_db)):
