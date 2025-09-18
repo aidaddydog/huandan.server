@@ -41,12 +41,14 @@ app.mount("/runtime", StaticFiles(directory=os.path.join(BASE_DIR, "runtime")), 
 
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "app", "templates"))
 
-templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "app", "templates"))
 # 让模板改动无需重启即可生效
 try:
     templates.env.auto_reload = True
 except Exception:
     pass
+
+from app.admin_extras import router as admin_extras_router
+app.include_router(admin_extras_router)
 
 # —— 启动时初始化数据库（避免并发重复建表） ——
 @app.on_event("startup")
