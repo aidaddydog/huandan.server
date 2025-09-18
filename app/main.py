@@ -674,3 +674,6 @@ def api_runtime_sumatra(arch: str = "win64", code: str = Query(""), db=Depends(g
     fp = os.path.join(BASE_DIR, "runtime", fname)
     if not os.path.exists(fp): raise HTTPException(status_code=404, detail="runtime not found on server")
     return FileResponse(fp, media_type="application/octet-stream", filename=fname)
+    
+from app.admin_extras import router as admin_extras_router
+app.include_router(admin_extras_router)
