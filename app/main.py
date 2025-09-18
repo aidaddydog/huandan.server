@@ -40,6 +40,15 @@ app.mount("/runtime", StaticFiles(directory=os.path.join(BASE_DIR, "runtime")), 
 
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "app", "templates"))
 
+# —— 启动时初始化数据库（避免并发重复建表） ——
+@app.on_event("startup")
+def _init_db():
+    try:
+        Base.metadata.create_all(bind=engine, checkfirst=True)
+    except Exception as e:
+        print("DB init warn:", e)
+
+
 # -------- 数据库 --------
 engine = create_engine(
     f"sqlite:///{os.path.join(BASE_DIR,'huandan.sqlite3')}",
@@ -84,7 +93,10 @@ class TrackingFile(Base):
     file_path = Column(Text)
     uploaded_at = Column(DateTime, default=datetime.utcnow)
 
-Base.metadata.create_all(bind=engine)
+# Base.metadata.create_all(bind=engine)
+os.makedirs(os.path.join(BASE_DIR, "updates"), exist_ok=True)
+os.makedirs(os.path.join(BASE_DIR, "runtime"), exist_ok=True)
+
 
 # -------- 工具函数 --------
 def now_iso(): return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
