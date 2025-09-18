@@ -131,16 +131,26 @@ systemctl enable --now huandan.service || true
 systemctl --no-pager -l status huandan.service | sed -n '1,60p'
 
 # 8) 重建 mapping.json（避免导入时并发建表）
-step "8) 重建 mapping.json（修正 sys.path）"
+step "8) 重建 mapping.json（修正 sys.path + 先确保建表）"
 mkdir -p "$BASE/runtime" "$BASE/updates"
 env BASE="$BASE" HUANDAN_DATA="$DATA" "$BASE/.venv/bin/python" - <<'PY'
 import os, sys
-base = os.environ['BASE']; sys.path.insert(0, base)
-from app.main import SessionLocal, write_mapping_json, set_mapping_version
-db=SessionLocal(); set_mapping_version(db); write_mapping_json(db)
+base = os.environ['BASE']
+sys.path.insert(0, base)
+
+# 先确保表存在（避免服务启动与此处并发导致的 no such table）
+from app.main import Base, engine, SessionLocal, write_mapping_json, set_mapping_version
+try:
+    Base.metadata.create_all(bind=engine, checkfirst=True)
+except Exception as e:
+    print("WARN create_all:", e)
+
+db = SessionLocal()
+set_mapping_version(db)
+write_mapping_json(db)
 print("OK: mapping.json rebuilt & version bumped")
 PY
-ok "映射重建 OK"
+ok "映射文件重建完成"
 
 # 9) UFW
 step "9) 防火墙（若 UFW=active 且 HOST=0.0.0.0）"
