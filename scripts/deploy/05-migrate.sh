@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
-source "$DIR/lib/common.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPTS_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "$SCRIPTS_ROOT/lib/common.sh"
 load_env
 require_env HUANDAN_BASE
 

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
-source "$DIR/lib/common.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPTS_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPTS_ROOT/.." && pwd)"
+source "$SCRIPTS_ROOT/lib/common.sh"
 load_env
 require_env HUANDAN_BASE PYBIN
 
@@ -12,5 +14,5 @@ fi
 # shellcheck disable=SC1091
 source "$HUANDAN_BASE/.venv/bin/activate"
 python -m pip install -U pip wheel
-pip install -r "$(cd "$DIR/../.." && pwd)/requirements.txt"
+pip install -r "$REPO_ROOT/requirements.txt"
 ok "Python 依赖安装完成"

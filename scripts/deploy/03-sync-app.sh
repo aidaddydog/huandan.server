@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
-ROOT="$(cd "$DIR/../.." && pwd)"
-source "$DIR/lib/common.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPTS_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPTS_ROOT/.." && pwd)"
+source "$SCRIPTS_ROOT/lib/common.sh"
 load_env
 require_env HUANDAN_BASE HUANDAN_DATA
 
@@ -20,7 +21,7 @@ if [[ "$b" =~ ^[Yy]$ ]]; then
   ok "已清理可再生内容"
 fi
 
-rsync -av --delete   "$ROOT/src/" "$HUANDAN_BASE/"   --exclude ".venv"   --exclude "__pycache__"   | tee -a "$LOG"
+rsync -av --delete   "$REPO_ROOT/src/" "$HUANDAN_BASE/"   --exclude ".venv"   --exclude "__pycache__"   | tee -a "$LOG"
 
 chown -R huandan:huandan "$HUANDAN_BASE"
 ok "应用文件同步完成"
