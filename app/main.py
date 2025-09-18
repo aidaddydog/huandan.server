@@ -1,5 +1,6 @@
 # app/main.py
 import os, zipfile, re, shutil, time, math, json, traceback
+import subprocess, shlex
 from datetime import datetime, timedelta
 from typing import Optional
 
