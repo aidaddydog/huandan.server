@@ -1,60 +1,65 @@
 #!/usr/bin/env bash
-# Huandan 在线一键部署引导
-# 用法：bash <(curl -fsSL https://raw.githubusercontent.com/aidaddydog/huandan.server/main/scripts/bootstrap_online.sh)
-set -Eeuo pipefail
+# 在线一键安装（与历史命令一致）
+set -euo pipefail
+REPO="${REPO:-aidaddydog/huandan.server}"
+BRANCH="${BRANCH:-main}"
+APP_PORT="${APP_PORT:-8000}"
+INSTALL_DIR="${INSTALL_DIR:-/opt/huandan}"
+SERVICE_NAME="${SERVICE_NAME:-huandan}"
+WITH_NGINX="${WITH_NGINX:-0}"
 
-LOG=/var/log/huandan-bootstrap.log
-exec > >(tee -a "$LOG") 2>&1
+echo ">>> Bootstrap: repo=$REPO branch=$BRANCH port=$APP_PORT dir=$INSTALL_DIR service=$SERVICE_NAME nginx=$WITH_NGINX"
+sudo apt-get update -y
+sudo apt-get install -y git curl python3-venv python3-pip
 
-: "${BRANCH:=main}"
-: "${REPO:=https://github.com/aidaddydog/huandan.server.git}"
-: "${DEST:=/opt/huandan-server}"
-
-step(){ echo "==> $*"; }
-ok(){ echo "✔ $*"; }
-die(){ echo "✘ $*"; exit 1; }
-trap 'die "失败，详见 $LOG（或执行：journalctl -u huandan.service -e -n 200）"' ERR
-
-[ "$(id -u)" -eq 0 ] || die "请用 root 运行"
-
-step "安装系统依赖"
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -y
-apt-get install -y --no-install-recommends git curl ca-certificates tzdata python3-venv python3-pip ufw rsync unzip
-
-step "获取代码到 $DEST（分支：$BRANCH）"
-if [ -d "$DEST/.git" ]; then
-  git -C "$DEST" fetch --all --prune || true
-  git -C "$DEST" checkout "$BRANCH" || true
-  git -C "$DEST" reset --hard "origin/$BRANCH" || true
-  git -C "$DEST" clean -fd || true
+APP_HOME="$INSTALL_DIR/src"
+if [[ -d "$APP_HOME/.git" ]]; then
+  echo ">>> 更新仓库 $APP_HOME"
+  sudo git -C "$APP_HOME" fetch --all --prune
+  sudo git -C "$APP_HOME" checkout "$BRANCH"
+  sudo git -C "$APP_HOME" pull --ff-only origin "$BRANCH"
 else
-  rm -rf "$DEST"
-  git clone -b "$BRANCH" "$REPO" "$DEST"
+  echo ">>> 克隆仓库到 $APP_HOME"
+  sudo mkdir -p "$INSTALL_DIR"
+  sudo git clone -b "$BRANCH" "https://github.com/$REPO.git" "$APP_HOME"
 fi
-ok "代码准备完成"
+sudo chown -R $USER:$USER "$INSTALL_DIR"
 
-step "准备 $DEST/.deploy.env（仓库内默认配置）"
-if [ ! -f "$DEST/.deploy.env" ]; then
-  cat > "$DEST/.deploy.env" <<'ENV'
-PORT=8000
-HOST=0.0.0.0
-AUTO_CLEAN=no
-BRANCH=main
-REPO=https://github.com/aidaddydog/huandan.server.git
-DATA=/opt/huandan-data
-SECRET_KEY=please-change-me
-# BASE 由安装脚本自动识别为当前仓库根
-ENV
-  ok "已写入 $DEST/.deploy.env"
-else
-  ok "$DEST/.deploy.env 已存在，保持不变"
+cd "$APP_HOME"
+if [[ ! -f ".deploy.env" ]]; then
+  cat > .deploy.env <<EOF
+APP_NAME="$SERVICE_NAME"
+APP_PORT=$APP_PORT
+APP_HOST="0.0.0.0"
+APP_ENV="prod"
+DATA_DIR="$INSTALL_DIR/data"
+STORAGE_DIR="$INSTALL_DIR/storage"
+UPDATES_DIR="$INSTALL_DIR/updates"
+LOG_DIR="/var/log/$SERVICE_NAME"
+EOF
 fi
 
-step "执行仓库安装脚本（非交互）"
-cd "$DEST"
-chmod +x scripts/install_root.sh
-# 让安装脚本明确以 $DEST 作为 BASE，其他参数从 .deploy.env 读取
-BASE="$DEST" bash scripts/install_root.sh
+bash scripts/install.sh
 
-ok "完成。后台：http://<服务器IP>:8000/admin   首次初始化：/admin/bootstrap"
+if [[ "$WITH_NGINX" == "1" ]]; then
+  echo ">>> 安装 Nginx 反代"
+  sudo apt-get install -y nginx
+  sudo bash -c "cat > /etc/nginx/sites-available/${SERVICE_NAME}.conf" <<NGX
+server {
+  listen 80;
+  server_name _;
+  location / {
+    proxy_pass http://127.0.0.1:${APP_PORT};
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+  }
+}
+NGX
+  sudo ln -sf /etc/nginx/sites-available/${SERVICE_NAME}.conf /etc/nginx/sites-enabled/${SERVICE_NAME}.conf
+  sudo nginx -t && sudo systemctl restart nginx
+fi
+
+echo ">>> 完成： http://$(hostname -I | awk '{print $1}'):${APP_PORT}/  （健康检查：/health）"
+

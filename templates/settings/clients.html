@@ -1,0 +1,35 @@
+{% extends "layout/base.html" %}
+{% set active_nav = 'settings' %}
+
+{% block title %}客户端更新管理{% endblock %}
+
+{% block content %}
+<section class="card">
+  <h2>客户端更新包</h2>
+  <p>上传 .exe/.zip 自动生成 latest.json，客户端启动检查升级。</p>
+  <form id="uploadForm" class="upload" enctype="multipart/form-data">
+    <label>版本号</label>
+    <input name="version" placeholder="例如 v1.9.6" required />
+    <label>更新说明</label>
+    <textarea name="notes" rows="3" placeholder="本次更新说明…"></textarea>
+    <label><input type="checkbox" name="force"> 强制更新</label>
+    <label>上传包</label>
+    <input type="file" name="file" required />
+    <button class="btn btn--primary" type="submit">上传并生效</button>
+  </form>
+</section>
+{% endblock %}
+
+{% block script %}
+<script>
+document.getElementById('uploadForm').addEventListener('submit', async (e)=>{
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const res = await fetch('/api/v1/client/update/upload', {method:'POST', body: fd});
+  const j = await res.json();
+  alert(j.message || '已上传');
+  if(j.data && j.data.url) location.reload();
+});
+</script>
+{% endblock %}
+
