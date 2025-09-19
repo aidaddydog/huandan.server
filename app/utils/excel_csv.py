@@ -1,15 +1,17 @@
-from typing import List, Dict
+from typing import List, Dict, IO
 import csv
 from io import BytesIO, StringIO
 try:
     import openpyxl
 except Exception:
     openpyxl = None
+
 def parse_csv(content: bytes) -> List[Dict]:
     text = content.decode('utf-8', errors='ignore')
     f = StringIO(text)
     reader = csv.DictReader(f)
     return [dict(row) for row in reader]
+
 def parse_xlsx(content: bytes) -> List[Dict]:
     if openpyxl is None:
         raise RuntimeError('openpyxl 未安装')

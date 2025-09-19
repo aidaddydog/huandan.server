@@ -15,13 +15,16 @@
       {% block subnav %}{% endblock %}
     </div>
   </header>
+
   <main class="container">
     {% include 'components/_toast.html' %}
     {% block content %}{% endblock %}
   </main>
+
   <div class="sticky-bar">
     {% block sticky %}{% endblock %}
   </div>
+
   {% block script %}{% endblock %}
 </body>
 </html>

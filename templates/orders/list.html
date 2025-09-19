@@ -1,8 +1,10 @@
 {% extends "layout/base.html" %}
 {% set active_nav = 'orders' %}
 {% set active_sub = 'list' %}
+
 {% block title %}订单列表{% endblock %}
 {% block subnav %}{% include 'layout/_subnav_orders.html' %}{% endblock %}
+
 {% block content %}
 <section class="toolbar">
   <div class="toolbar__row">
@@ -25,6 +27,7 @@
     </div>
   </div>
 </section>
+
 <table class="table">
   <thead>
     <tr>
@@ -32,9 +35,12 @@
       <th>店铺</th><th>订单</th><th>客户</th><th>运单/渠道</th><th>日期</th><th style="width:180px">操作</th>
     </tr>
   </thead>
-  <tbody id="orderTbody"></tbody>
+  <tbody id="orderTbody">
+    <!-- 数据由 /api/v1/orders 加载 -->
+  </tbody>
 </table>
 {% endblock %}
+
 {% block sticky %}
   <div class="sticky__left">
     <select id="bulkAction">
@@ -54,7 +60,9 @@
     <span class="muted" id="totalInfo">共 0 条</span>
   </div>
 {% endblock %}
+
 {% block script %}
+<script type="module" src="{{ url_for('static', path='js/modules/toast.js') }}"></script>
 <script type="module" src="{{ url_for('static', path='js/modules/api.js') }}"></script>
 <script type="module" src="{{ url_for('static', path='js/modules/print.js') }}"></script>
 <script type="module" src="{{ url_for('static', path='js/pages/orders.js') }}"></script>

@@ -1,4 +1,5 @@
 import { apiPost } from './api.js';
+
 export async function mergeAndPrint(trackingNos){
   if(!trackingNos || !trackingNos.length){ alert('请先勾选需要打印的订单'); return; }
   const blob = await apiPost('/api/v1/print/merge', { tracking_nos: trackingNos });

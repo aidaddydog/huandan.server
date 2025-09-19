@@ -1,16 +1,19 @@
 import { apiGet } from '../modules/api.js';
 import { mergeAndPrint } from '../modules/print.js';
+
 const tbody = document.querySelector('#orderTbody');
 const checkAll = document.querySelector('#checkAll');
 const selInfo = document.querySelector('#selInfo');
 const bulkAction = document.querySelector('#bulkAction');
 const doAction = document.querySelector('#doAction');
 const totalInfo = document.querySelector('#totalInfo');
+
 function selectedTrackingNos(){
   const rows = [...tbody.querySelectorAll('tr')];
   return rows.filter(r => r.querySelector('.rowCheck')?.checked).map(r => r.dataset.tracking).filter(Boolean);
 }
 function refreshSelInfo(){ if(selInfo) selInfo.textContent = `已选 ${selectedTrackingNos().length} 条`; }
+
 async function load(page=1,size=50){
   const j = await apiGet(`/api/v1/orders?page=${page}&size=${size}`);
   const {rows,total} = j.data;

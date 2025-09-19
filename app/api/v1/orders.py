@@ -1,7 +1,9 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from typing import Dict, Any
 from app.repositories.mapping_repo import get_mappings
+
 router = APIRouter()
+
 @router.get("/orders")
 def list_orders(page:int=1, size:int=50, q:str="") -> Dict[str, Any]:
     data = get_mappings()

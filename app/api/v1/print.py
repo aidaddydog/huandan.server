@@ -3,7 +3,9 @@ from fastapi.responses import StreamingResponse
 from typing import List, Dict, Any
 from app.services.print_service import build_merged_pdf_stream
 from app.repositories.mapping_repo import mark_printed
+
 router = APIRouter()
+
 @router.post("/print/merge")
 def merge_print(payload: Dict[str, Any] = Body(...)):
     tracking_nos: List[str] = payload.get("tracking_nos") or []
@@ -12,6 +14,7 @@ def merge_print(payload: Dict[str, Any] = Body(...)):
     stream, filename = build_merged_pdf_stream(tracking_nos)
     headers = {"Content-Disposition": f'inline; filename="{filename}"'}
     return StreamingResponse(stream, media_type="application/pdf", headers=headers)
+
 @router.post("/print/report")
 def report_print(payload: Dict[str, Any] = Body(...)):
     t = (payload.get("tracking_no") or "").strip()

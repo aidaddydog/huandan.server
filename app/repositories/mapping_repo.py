@@ -3,17 +3,20 @@ from pathlib import Path
 from typing import List, Dict, Optional
 from app.repositories.base import with_conn
 from app.core.config import DATA_DIR
+
 def _mapping_file() -> Path:
     return DATA_DIR / "mapping.json"
+
 @with_conn
 def get_mappings(conn) -> List[Dict]:
+    """优先 DB（如有表），否则回退 mapping.json（数组或 {version,mappings}）"""
     if conn:
         try:
             rows = conn.execute("""
                 SELECT om.order_id, om.tracking_no, om.updated_at,
                        om.customer_order, om.platform, om.shop_name,
                        om.buyer_id, om.country, om.postal_code, om.channel_name,
-                       om.printed_at, om.shipped_at, om.transfer_no, om.sku_summary
+                       om.printed_at, om.shipped_at
                   FROM OrderMapping om
                 ORDER BY om.updated_at DESC
             """).fetchall()
@@ -28,6 +31,7 @@ def get_mappings(conn) -> List[Dict]:
         return data if isinstance(data, list) else []
     except Exception:
         return []
+
 @with_conn
 def get_mapping_version(conn) -> str:
     if conn:
@@ -40,10 +44,13 @@ def get_mapping_version(conn) -> str:
     if not p.exists(): return "v0"
     ts = int(p.stat().st_mtime)
     return f"file-{ts}"
+
 def write_mapping_json(mappings: List[Dict]):
     p = _mapping_file()
     p.write_text(json.dumps(mappings, ensure_ascii=False, indent=2), encoding="utf-8")
+
 def upsert_mappings(new_rows: List[Dict]) -> Dict:
+    """简化：只写 mapping.json（对 DB 无副作用），以 order_id 优先、其次 tracking_no 去重合并"""
     base = get_mappings(None)
     index_by_order = {str(x.get("order_id","")): i for i,x in enumerate(base) if x.get("order_id")}
     index_by_track = {str(x.get("tracking_no","")): i for i,x in enumerate(base) if x.get("tracking_no")}
@@ -63,6 +70,7 @@ def upsert_mappings(new_rows: List[Dict]) -> Dict:
             base[idx].update(r); updated += 1
     write_mapping_json(base)
     return {"inserted": inserted, "updated": updated, "total": len(base)}
+
 @with_conn
 def find_by_order_or_customer(conn, code: str) -> Optional[Dict]:
     if conn:
@@ -80,6 +88,7 @@ def find_by_order_or_customer(conn, code: str) -> Optional[Dict]:
         if code in (str(r.get("order_id","")), str(r.get("customer_order",""))):
             return r
     return None
+
 @with_conn
 def mark_printed(conn, tracking_no: str) -> bool:
     if not tracking_no: return False
@@ -89,6 +98,7 @@ def mark_printed(conn, tracking_no: str) -> bool:
             conn.commit(); return True
         except Exception:
             pass
+    # 回退：在 json 里打 printed_at
     arr = get_mappings(None); changed=False
     for x in arr:
         if str(x.get("tracking_no","")) == str(tracking_no):

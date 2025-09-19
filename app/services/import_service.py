@@ -1,10 +1,12 @@
-from typing import Dict, List
+from typing import Dict, List, Tuple
 from fastapi import UploadFile
 from app.utils.excel_csv import parse_csv, parse_xlsx
 from app.repositories.mapping_repo import upsert_mappings
 from app.utils.fs_utils import unzip_to_dir
 from app.core.config import PDF_DIR
+
 def _normalize_rows(rows: List[dict]) -> List[dict]:
+    # 尝试自动识别列名（订单号/运单号/转单号/渠道等）
     def pick(obj: dict, keys: List[str]) -> str:
         for k in keys:
             if k in obj and obj[k]: return str(obj[k]).strip()
@@ -25,18 +27,20 @@ def _normalize_rows(rows: List[dict]) -> List[dict]:
             "sku_summary": pick(r, ["sku_summary", "sku", "商品摘要"]),
         })
     return normalized
+
 async def import_orders_file(file: UploadFile) -> Dict:
     content = await file.read()
     name = (file.filename or "").lower()
     if name.endswith(".csv"):
         rows = parse_csv(content)
-    elif name.endswith((".xlsx",".xlsm",".xls")):
+    elif name.endswith(".xlsx") or name.endswith(".xlsm") or name.endswith(".xls"):
         rows = parse_xlsx(content)
     else:
         return {"error": "仅支持 CSV/XLSX"}
     normalized = _normalize_rows(rows)
     stat = upsert_mappings(normalized)
     return {"inserted": stat["inserted"], "updated": stat["updated"], "total": stat["total"]}
+
 async def import_pdfs_zip(file: UploadFile) -> Dict:
     ok, fail = unzip_to_dir(file.file, PDF_DIR)
     return {"imported": ok, "skipped": fail}

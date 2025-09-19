@@ -1,6 +1,7 @@
 from io import BytesIO
 from typing import List
 from pypdf import PdfReader, PdfWriter
+
 def merge_pdfs(paths: List[str]) -> BytesIO:
     writer = PdfWriter()
     for p in paths:

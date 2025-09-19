@@ -2,6 +2,7 @@ import sqlite3
 from pathlib import Path
 from typing import Callable, Any
 from app.core.config import DB_PATH
+
 def with_conn(func: Callable[..., Any]):
     def wrapper(*args, **kwargs):
         if not Path(DB_PATH).exists():

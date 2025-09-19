@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# 在线一键安装（与历史命令一致）
 set -euo pipefail
 REPO="${REPO:-aidaddydog/huandan.server}"
 BRANCH="${BRANCH:-main}"
@@ -6,9 +7,11 @@ APP_PORT="${APP_PORT:-8000}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/huandan}"
 SERVICE_NAME="${SERVICE_NAME:-huandan}"
 WITH_NGINX="${WITH_NGINX:-0}"
+
 echo ">>> Bootstrap: repo=$REPO branch=$BRANCH port=$APP_PORT dir=$INSTALL_DIR service=$SERVICE_NAME nginx=$WITH_NGINX"
 sudo apt-get update -y
 sudo apt-get install -y git curl python3-venv python3-pip
+
 APP_HOME="$INSTALL_DIR/src"
 if [[ -d "$APP_HOME/.git" ]]; then
   echo ">>> 更新仓库 $APP_HOME"
@@ -21,6 +24,7 @@ else
   sudo git clone -b "$BRANCH" "https://github.com/$REPO.git" "$APP_HOME"
 fi
 sudo chown -R $USER:$USER "$INSTALL_DIR"
+
 cd "$APP_HOME"
 if [[ ! -f ".deploy.env" ]]; then
   cat > .deploy.env <<EOF
@@ -34,7 +38,9 @@ UPDATES_DIR="$INSTALL_DIR/updates"
 LOG_DIR="/var/log/$SERVICE_NAME"
 EOF
 fi
+
 bash scripts/install.sh
+
 if [[ "$WITH_NGINX" == "1" ]]; then
   echo ">>> 安装 Nginx 反代"
   sudo apt-get install -y nginx
@@ -54,5 +60,6 @@ NGX
   sudo ln -sf /etc/nginx/sites-available/${SERVICE_NAME}.conf /etc/nginx/sites-enabled/${SERVICE_NAME}.conf
   sudo nginx -t && sudo systemctl restart nginx
 fi
-echo ">>> 完成： http://$(hostname -I | awk '{print $1}'):${APP_PORT}/  （健康检查：/health）"
+
+echo ">>> 完成： http://$(hostname -I | awk '{print $1}'):${APP_PORT}/"
 
