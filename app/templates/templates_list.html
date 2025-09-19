@@ -3,6 +3,37 @@
 
 {% if pushed == '1' %}<div class="ok">已提交并推送到仓库。</div>{% endif %}
 {% if err %}<div class="err">{{err}}</div>{% endif %}
+{% if switched == '1' %}<div class="ok">已将远端切换为 SSH 格式。</div>{% endif %}
+{% if keymsg %}<div class="card"><pre class="code" style="white-space:pre-wrap">{{keymsg}}</pre></div>{% endif %}
+{% if test == '1' %}<div class="ok">SSH 连接测试成功：此服务器已通过 GitHub 身份验证。</div>{% elif test == '0' %}<div class="err">SSH 连接测试失败：请先将下方公钥添加到 GitHub。</div>{% endif %}
+
+<div class="card">
+  <h3>SSH 推送配置</h3>
+  <div class="grid2">
+    <div>
+      <p><b>当前分支：</b>{{info.branch or '—'}}</p>
+      <p><b>远端：</b><code>{{origin.origin or '—'}}</code>
+        {% if origin.type == 'ssh' %}<span class="badge">SSH</span>{% elif origin.type == 'https' %}<span class="badge">HTTPS</span>{% else %}<span class="badge">其他</span>{% endif %}
+      </p>
+      <p class="muted">ahead: {{info.ahead}} / behind: {{info.behind}}</p>
+      <form method="post" action="/admin/templates/ssh/switch_to_ssh" style="margin-top:8px">
+        <button class="btn" {% if origin.type == 'ssh' %}disabled{% endif %}>切换远端为 SSH</button>
+      </form>
+    </div>
+    <div>
+      <p><b>服务器公钥（复制到 GitHub）：</b></p>
+      <textarea id="pubkey" class="editor" style="height:120px">{{ssh.pubkey}}</textarea>
+      <div class="row" style="margin-top:6px">
+        <form method="post" action="/admin/templates/ssh/generate"><button class="primary" type="submit">生成/更新 SSH Key</button></form>
+        <button class="btn" type="button" onclick="copyKey()">复制公钥</button>
+        <form method="post" action="/admin/templates/ssh/test"><button class="btn" type="submit">测试连接</button></form>
+      </div>
+      <div class="muted" style="margin-top:6px">
+        打开 GitHub：个人 SSH Keys 或仓库 Deploy Keys（务必勾选 <b>Allow write access</b>），粘贴上方公钥后再点“测试连接”。
+      </div>
+    </div>
+  </div>
+</div>
 
 <div class="card">
   <h3>提交到仓库</h3>
@@ -10,11 +41,6 @@
     <input name="message" placeholder="提交说明" value="web-edit: update templates" style="flex:1">
     <button type="submit" class="primary">一键回传到仓库</button>
   </form>
-  {% if info.mode == 'git' %}
-    <div class="muted">分支：{{info.branch}}；远端：<code>{{info.origin}}</code>；本地 ahead:{{info.ahead}} / behind:{{info.behind}}</div>
-  {% else %}
-    <div class="muted">当前目录不是 Git 仓库，不能推送。</div>
-  {% endif %}
 </div>
 
 <div class="card">
@@ -52,4 +78,11 @@
     </tbody>
   </table>
 </div>
+
+<script>
+function copyKey(){
+  const t=document.getElementById('pubkey');
+  t.select(); document.execCommand('copy'); alert('已复制公钥到剪贴板');
+}
+</script>
 {% endblock %}
