@@ -9,6 +9,7 @@ def get_pdf_paths_by_tracking_nos(conn, tracking_nos: List[str]) -> List[str]:
     for n in tracking_nos:
         n = (n or "").strip()
         if n and n not in uniq: uniq.append(n)
+    # DB 优先（若有 file_path 字段）
     if conn and uniq:
         try:
             q = ",".join("?" for _ in uniq)
@@ -18,6 +19,7 @@ def get_pdf_paths_by_tracking_nos(conn, tracking_nos: List[str]) -> List[str]:
                 if p and os.path.exists(p): paths.append(p)
         except Exception:
             pass
+    # 回退：storage/pdfs/{tracking}.pdf
     for n in uniq:
         p = os.path.join(PDF_DIR, f"{n}.pdf")
         if os.path.exists(p): paths.append(p)

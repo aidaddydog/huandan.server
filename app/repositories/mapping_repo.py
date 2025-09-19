@@ -9,13 +9,14 @@ def _mapping_file() -> Path:
 
 @with_conn
 def get_mappings(conn) -> List[Dict]:
+    """优先 DB（如有表），否则回退 mapping.json（数组或 {version,mappings}）"""
     if conn:
         try:
             rows = conn.execute("""
                 SELECT om.order_id, om.tracking_no, om.updated_at,
                        om.customer_order, om.platform, om.shop_name,
                        om.buyer_id, om.country, om.postal_code, om.channel_name,
-                       om.printed_at, om.shipped_at, om.transfer_no, om.sku_summary
+                       om.printed_at, om.shipped_at
                   FROM OrderMapping om
                 ORDER BY om.updated_at DESC
             """).fetchall()
@@ -49,6 +50,7 @@ def write_mapping_json(mappings: List[Dict]):
     p.write_text(json.dumps(mappings, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def upsert_mappings(new_rows: List[Dict]) -> Dict:
+    """简化：只写 mapping.json（对 DB 无副作用），以 order_id 优先、其次 tracking_no 去重合并"""
     base = get_mappings(None)
     index_by_order = {str(x.get("order_id","")): i for i,x in enumerate(base) if x.get("order_id")}
     index_by_track = {str(x.get("tracking_no","")): i for i,x in enumerate(base) if x.get("tracking_no")}
@@ -96,6 +98,7 @@ def mark_printed(conn, tracking_no: str) -> bool:
             conn.commit(); return True
         except Exception:
             pass
+    # 回退：在 json 里打 printed_at
     arr = get_mappings(None); changed=False
     for x in arr:
         if str(x.get("tracking_no","")) == str(tracking_no):

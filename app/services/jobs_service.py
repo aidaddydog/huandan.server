@@ -1,7 +1,9 @@
 import json, time, uuid
+from pathlib import Path
+from typing import Dict
 from app.core.config import JOBS_DIR
 
-def _path(job_id: str):
+def _path(job_id: str) -> Path:
     return JOBS_DIR / f"{job_id}.json"
 
 def create_job(job_type: str, total: int = 0) -> str:
@@ -29,10 +31,11 @@ def finish_job(job_id: str, message: str = "完成"):
     p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def error_job(job_id: str, message: str):
+    p = _path(job_id)
     data = {"id":job_id,"status":"error","message":message,"updated_at":time.time()}
-    _path(job_id).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
-def get_job(job_id: str):
+def get_job(job_id: str) -> Dict:
     p = _path(job_id)
     if not p.exists(): return {"error":"not found"}
     return json.loads(p.read_text(encoding="utf-8"))

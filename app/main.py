@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from app.core.config import BASE_DIR, UPDATES_DIR
 
@@ -12,12 +12,7 @@ from app.api.v1.import_ import router as import_router
 
 app = FastAPI(title="Huandan Server")
 
-# 健康检查
-@app.get("/health")
-def health():
-    return PlainTextResponse("ok")
-
-# 静态与更新包目录
+# 挂载静态与更新包目录
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 app.mount("/updates", StaticFiles(directory=str(UPDATES_DIR)), name="updates")
 
@@ -40,7 +35,7 @@ def print_board(request: Request):
 def settings_clients(request: Request):
     return templates.TemplateResponse("settings/clients.html", {"request": request})
 
-# API 路由
+# API
 app.include_router(mapping_router, prefix="/api/v1", tags=["mapping"])
 app.include_router(print_router,   prefix="/api/v1", tags=["print"])
 app.include_router(client_router,  prefix="/api/v1", tags=["client"])

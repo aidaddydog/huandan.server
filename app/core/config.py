@@ -16,6 +16,7 @@ RUNTIME_DIR = BASE_DIR / "runtime"
 
 DB_PATH = DATA_DIR / "app.db"  # 可选
 
+# 初始化目录
 for d in (DATA_DIR, PDF_DIR, CLIENT_UPD_DIR, JOBS_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
