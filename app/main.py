@@ -257,6 +257,41 @@ def dashboard(request: Request, db=Depends(get_db)):
     }
     return templates.TemplateResponse("dashboard.html", {"request": request, "stats": stats})
 
+# ------------------ DANGER ZONE：高危清空操作 ------------------
+@app.post("/admin/danger/wipe_pdfs")
+def danger_wipe_pdfs(request: Request, confirm: str = Form(""), db=Depends(get_db)):
+    require_admin(request, db)
+    if (confirm or "").strip() != "DELETE ALL PDF":
+        return RedirectResponse("/admin/files?danger=badconfirm", status_code=302)
+    # 删除磁盘所有 .pdf（包括未登记的）
+    removed_files = 0
+    try:
+        for name in os.listdir(PDF_DIR):
+            if name.lower().endswith(".pdf"):
+                fp = os.path.join(PDF_DIR, name)
+                if os.path.isfile(fp):
+                    try: os.remove(fp); removed_files += 1
+                    except Exception: pass
+    except Exception:
+        pass
+    # 清空 TrackingFile 表
+    removed_rows = db.query(TrackingFile).delete()
+    db.commit()
+    # 刷新版本 & 重写映射
+    set_mapping_version(db); write_mapping_json(db)
+    return RedirectResponse(f"/admin/files?danger=pdfs_cleared&files={removed_files}&rows={removed_rows}", status_code=302)
+
+@app.post("/admin/danger/wipe_orders")
+def danger_wipe_orders(request: Request, confirm: str = Form(""), db=Depends(get_db)):
+    require_admin(request, db)
+    if (confirm or "").strip() != "DELETE ALL ORDERS":
+        return RedirectResponse("/admin/orders?danger=badconfirm", status_code=302)
+    removed = db.query(OrderMapping).delete()
+    db.commit()
+    set_mapping_version(db); write_mapping_json(db)
+    return RedirectResponse(f"/admin/orders?danger=orders_cleared&rows={removed}", status_code=302)
+
+
 # ------------------ 工具：执行命令 ------------------
 def run_cmd(cmd: str, cwd: Optional[str] = None, timeout: int = 60):
     p = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True, timeout=timeout)
