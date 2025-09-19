@@ -1,0 +1,11 @@
+uvicorn[standard]
+fastapi
+jinja2
+sqlalchemy<2.0
+passlib[bcrypt]
+pandas
+openpyxl
+xlrd==1.2.0
+aiofiles
+itsdangerous
+python-multipart

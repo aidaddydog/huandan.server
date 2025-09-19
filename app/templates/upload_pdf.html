@@ -1,0 +1,8 @@
+{% extends "layout.html" %}{% block content %}
+<h2>上传 PDF ZIP</h2>
+<p>压缩包内文件名 = 运单号.pdf（系统会自动规范化：非法字符替换为下划线）</p>
+<form method="post" action="/admin/upload-pdf" enctype="multipart/form-data">
+  <input type="file" name="zipfile_upload" required>
+  <button type="submit">上传</button>
+</form>
+{% endblock %}
