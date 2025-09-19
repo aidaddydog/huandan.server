@@ -16,7 +16,7 @@
       </div>
     </form>
     <div class="muted" style="margin-top:6px">
-      说明：HTML 模板右侧以“保存后的实际渲染”为准；CSS/JS 支持即时预览（不保存）。
+      说明：HTML 以“保存后的实际渲染”为准；CSS/JS 支持即时预览（不保存）。
     </div>
   </div>
 
@@ -35,13 +35,10 @@
   function reloadSaved() {
     iframe.src = `/admin/templates/preview?kind=${encodeURIComponent(kind)}&path=${encodeURIComponent(path)}&ts=${Date.now()}`;
   }
-
   document.getElementById('btnSavePreview').addEventListener('click', function(){
-    // 提交后回到当前页，右侧自动加载保存文件
     document.getElementById('editForm').submit();
     setTimeout(reloadSaved, 800);
   });
-
   document.getElementById('btnPreview').addEventListener('click', function(){
     const code = editor.value || '';
     if (kind === 'static') {
@@ -54,7 +51,7 @@
         return;
       }
     }
-    // HTML：不解析 Jinja，仅做原始预览（建议保存后看右侧真实渲染）
+    // HTML：不解析 Jinja，仅原样预览；建议保存后看真实渲染
     iframe.srcdoc = code;
   });
 })();
