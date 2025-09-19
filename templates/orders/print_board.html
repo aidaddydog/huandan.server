@@ -1,0 +1,46 @@
+{% extends "layout/base.html" %}
+{% set active_nav = 'orders' %}
+{% set active_sub = 'print' %}
+{% block title %}换单打印（集合）{% endblock %}
+{% block subnav %}{% include 'layout/_subnav_orders.html' %}{% endblock %}
+{% block content %}
+<div class="grid2">
+  <section class="card">
+    <h3>导入单号（CSV/XLSX）</h3>
+    <form id="formImportOrders">
+      <input type="file" name="file" accept=".csv,.xlsx" required />
+      <button class="btn btn--primary" type="submit">上传导入</button>
+    </form>
+    <pre id="importOrdersResult" class="muted"></pre>
+  </section>
+  <section class="card">
+    <h3>导入面单（ZIP）</h3>
+    <form id="formImportPdfs">
+      <input type="file" name="file" accept=".zip" required />
+      <button class="btn btn--primary" type="submit">上传解压</button>
+    </form>
+    <pre id="importPdfsResult" class="muted"></pre>
+  </section>
+  <section class="card">
+    <h3>对齐工具（磁盘 ↔ 映射）</h3>
+    <button class="btn" id="btnScan">扫描对齐状态</button>
+    <button class="btn" id="btnFix">一键修复（为孤儿文件补建映射）</button>
+    <pre id="alignResult" class="muted"></pre>
+  </section>
+  <section class="card">
+    <h3>版本包管理（mapping.json + pdfs）</h3>
+    <button class="btn" id="btnBuild">生成版本包</button>
+    <button class="btn" id="btnList">刷新列表</button>
+    <ul id="packList"></ul>
+    <div class="mt8">
+      <input id="rollbackVer" placeholder="例如：20250919-01" />
+      <button class="btn btn--danger" id="btnRollback">回滚到版本</button>
+    </div>
+  </section>
+</div>
+{% endblock %}
+{% block script %}
+<script type="module" src="{{ url_for('static', path='js/modules/api.js') }}"></script>
+<script type="module" src="{{ url_for('static', path='js/pages/print_board.js') }}"></script>
+{% endblock %}
+

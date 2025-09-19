@@ -1,0 +1,62 @@
+{% extends "layout/base.html" %}
+{% set active_nav = 'orders' %}
+{% set active_sub = 'list' %}
+{% block title %}订单列表{% endblock %}
+{% block subnav %}{% include 'layout/_subnav_orders.html' %}{% endblock %}
+{% block content %}
+<section class="toolbar">
+  <div class="toolbar__row">
+    <div class="field">
+      <label>订单状态</label>
+      <select id="statusSelect"><option value="">全部</option><option value="pending">待审核</option></select>
+    </div>
+    <div class="field">
+      <label>运输方式</label>
+      <select id="channelSelect"><option value="">全部渠道</option></select>
+    </div>
+    <div class="field">
+      <label>创建时间</label>
+      <input type="datetime-local" id="dateStart" /><span class="dash">—</span><input type="datetime-local" id="dateEnd" />
+    </div>
+    <div class="field field--grow">
+      <label>单号搜索</label>
+      <input id="noSearch" placeholder="支持订单/运单/转单/系统单号；双击粘贴多条" />
+      <button id="btnSearch" class="btn btn--primary">搜索</button>
+    </div>
+  </div>
+</section>
+<table class="table">
+  <thead>
+    <tr>
+      <th style="width:40px"><input type="checkbox" id="checkAll"></th>
+      <th>店铺</th><th>订单</th><th>客户</th><th>运单/渠道</th><th>日期</th><th style="width:180px">操作</th>
+    </tr>
+  </thead>
+  <tbody id="orderTbody"></tbody>
+</table>
+{% endblock %}
+{% block sticky %}
+  <div class="sticky__left">
+    <select id="bulkAction">
+      <option value="">批量操作</option>
+      <option value="importNos">导入单号</option>
+      <option value="importPdfs">导入面单</option>
+      <option value="copy">批量复制</option>
+      <option value="print">批量打印</option>
+      <option value="delete">批量删除</option>
+    </select>
+    <button id="doAction" class="btn">执行</button>
+    <span id="selInfo" class="muted">已选 0 条</span>
+  </div>
+  <div class="sticky__right">
+    <label>每页</label>
+    <select id="pageSize"><option>50</option><option>100</option></select>
+    <span class="muted" id="totalInfo">共 0 条</span>
+  </div>
+{% endblock %}
+{% block script %}
+<script type="module" src="{{ url_for('static', path='js/modules/api.js') }}"></script>
+<script type="module" src="{{ url_for('static', path='js/modules/print.js') }}"></script>
+<script type="module" src="{{ url_for('static', path='js/pages/orders.js') }}"></script>
+{% endblock %}
+
