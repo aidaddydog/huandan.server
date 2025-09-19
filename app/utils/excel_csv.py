@@ -1,4 +1,4 @@
-from typing import List, Dict
+from typing import List, Dict, IO
 import csv
 from io import BytesIO, StringIO
 try:

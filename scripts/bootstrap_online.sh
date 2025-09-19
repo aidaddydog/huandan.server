@@ -61,5 +61,5 @@ NGX
   sudo nginx -t && sudo systemctl restart nginx
 fi
 
-echo ">>> 完成： http://$(hostname -I | awk '{print $1}'):${APP_PORT}/  （健康检查：/health）"
+echo ">>> 完成： http://$(hostname -I | awk '{print $1}'):${APP_PORT}/"
 

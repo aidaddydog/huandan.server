@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from typing import Dict, Any
 from app.repositories.mapping_repo import get_mappings
 

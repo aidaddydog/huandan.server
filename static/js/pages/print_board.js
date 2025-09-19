@@ -52,6 +52,7 @@ refreshPacks().catch(()=>{});
 btnRollback?.addEventListener('click', async ()=>{
   const v = rollbackVer.value.trim();
   if(!v) return alert('请输入版本号，如 20250919-01');
+  const fd = new FormData(); fd.append('version', v);
   const res = await fetch('/api/v1/version/rollback?version=' + encodeURIComponent(v), {method:'POST'});
   const j = await res.json();
   alert(JSON.stringify(j));
