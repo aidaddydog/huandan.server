@@ -1,93 +1,84 @@
-<!-- app/templates/upload_pdf.html -->
-<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8"/>
-  <title>导入 PDF（ZIP）</title>
-  <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;padding:16px}
-    .box{border:1px dashed #aaa;padding:20px;border-radius:8px;margin:12px 0}
-    .btn{display:inline-block;padding:8px 14px;border:1px solid #333;background:#111;color:#fff;border-radius:4px;text-decoration:none;cursor:pointer}
-    .row{margin:12px 0}
-    .bar{height:8px;background:#eee;border-radius:4px;overflow:hidden}
-    .bar>i{display:block;height:100%;background:#111;width:0%}
-    .small{font-size:12px;color:#666}
-    input[type=file]{display:block;margin:8px 0}
-  </style>
-</head>
+<!doctype html><html><head><meta charset="utf-8"><title>PDF导入</title></head>
 <body>
-  <h2>导入 PDF（ZIP）</h2>
-  <div class="box">
-    <input id="file" type="file" accept=".zip" />
-    <button class="btn" onclick="start()">开始导入</button>
-    <div class="row">
-      <div class="bar"><i id="bar"></i></div>
-      <p id="txt" class="small">等待选择文件...</p>
-    </div>
+{% include "_nav.html" %}
+<div style="padding:16px;max-width:720px">
+  <h2>PDF 导入</h2>
+  <input type="file" id="zipInput" accept=".zip">
+  <button id="btn" style="margin-left:8px;padding:6px 12px">确认导入</button>
+
+  <div id="uploadBox" style="margin-top:12px;display:none">
+    <div>上传：<span id="upPct">0%</span></div>
+    <progress id="upProg" value="0" max="100" style="width:100%"></progress>
   </div>
 
+  <pre id="log" style="margin-top:12px;background:#f7f7f7;padding:10px;height:220px;overflow:auto"></pre>
+</div>
+
 <script>
-let pid = null;
+const $ = sel => document.querySelector(sel);
+const log = (m) => { const pre = $("#log"); pre.textContent += m + "\n"; pre.scrollTop = pre.scrollHeight; };
+const btn = $("#btn");
 
-async function start(){
-  const f = document.getElementById('file').files[0];
-  if(!f){ alert("请选择 ZIP 文件"); return; }
-  pid = await newProgress("upload_pdfs");
-  await uploadWithProgress(f, pid);       // 前端上传进度
-  await watchServerStages(pid);           // 服务器解压/重打包进度
-}
+btn.addEventListener("click", async () => {
+  const f = $("#zipInput").files[0];
+  if (!f) { alert("请选择 ZIP 文件"); return; }
+  btn.disabled = true; const old = btn.textContent; btn.textContent = "处理中… ⏳";
+  $("#uploadBox").style.display = "block"; $("#upPct").textContent = "0%"; $("#upProg").value = 0;
+  $("#log").textContent = "";
 
-async function newProgress(tag){
-  const r = await fetch("/admin/progress/new?tag="+encodeURIComponent(tag));
-  const j = await r.json(); return j.id;
-}
-
-async function uploadWithProgress(file, pid){
-  return new Promise((resolve,reject)=>{
-    const bar=document.getElementById("bar");
-    const txt=document.getElementById("txt");
-    const xhr=new XMLHttpRequest();
-    xhr.open("POST","/admin/upload-pdf");
-    const fd=new FormData();
-    fd.append("zipfile_upload", file);
-    fd.append("progress_id", pid);
-    xhr.upload.onprogress = (e)=>{
-      if(e.lengthComputable){
-        const pct=Math.min(95, Math.round(e.loaded*100/e.total));
-        bar.style.width=pct+"%";
-        txt.textContent="上传中："+pct+"% ("+Math.round(e.loaded/1048576)+"MB/"+Math.round(e.total/1048576)+"MB)";
-      }else{
-        txt.textContent="上传中... ("+Math.round(e.loaded/1048576)+"MB)";
-      }
-    };
-    xhr.onreadystatechange = ()=>{
-      if(xhr.readyState===4){
-        if(xhr.status>=200 && xhr.status<400){
-          resolve();
-        }else{
-          reject(new Error("上传失败: "+xhr.status));
+  try {
+    // 1) 先上传，仅用于显示“上传进度”
+    const fd = new FormData(); fd.append("zipfile_upload", f);
+    const xhr = new XMLHttpRequest();
+    const tmpName = await new Promise((resolve, reject) => {
+      xhr.open("POST", "/admin/api/upload-pdf-file");
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          const pct = Math.round(e.loaded * 100 / e.total);
+          $("#upPct").textContent = pct + "%"; $("#upProg").value = pct;
         }
-      }
-    };
-    xhr.onerror = ()=>reject(new Error("网络错误"));
-    xhr.send(fd);
-  });
-}
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try { const j = JSON.parse(xhr.responseText); if (j.ok) resolve(j.tmp); else reject(new Error("上传失败")); }
+          catch(e){ reject(e); }
+        } else reject(new Error("上传接口返回 " + xhr.status));
+      };
+      xhr.onerror = () => reject(new Error("网络错误"));
+      xhr.send(fd);
+    });
 
-async function watchServerStages(pid){
-  const bar=document.getElementById("bar");
-  const txt=document.getElementById("txt");
-  while(true){
-    const r=await fetch("/admin/progress/get?id="+pid,{cache:"no-store"});
-    const s=await r.json();
-    if(s.missing){ txt.textContent="任务不存在"; return; }
-    bar.style.width = (s.pct||0)+"%";
-    txt.textContent = (s.stage||"-")+"："+(s.note||"")+"（"+(s.pct||0)+"%）";
-    if(s.done){ break; }
-    await new Promise(r=>setTimeout(r,800));
+    log("上传完成，开始解压/导入/重建ZIP…");
+
+    // 2) SSE 监听后端进度
+    await new Promise((resolve, reject) => {
+      const es = new EventSource(`/admin/api/apply-pdf-import?tmp=${encodeURIComponent(tmpName)}`);
+      es.onmessage = (ev) => {
+        try {
+          const d = JSON.parse(ev.data);
+          if (d.phase === "unzip" && d.total && d.done !== undefined) {
+            log(`解压进度：${d.done}/${d.total}`);
+          } else if (d.phase === "repack") {
+            log(d.msg || "正在重建ZIP…");
+          } else if (d.phase === "done") {
+            log(`完成：导入 ${d.saved || 0}，跳过 ${d.skipped || 0}`);
+            es.close();
+            alert("导入成功！");
+            window.location.href = d.redirect || "/admin/files";
+            resolve();
+          } else if (d.phase === "error") {
+            es.close(); reject(new Error(d.msg || "处理失败"));
+          }
+        } catch(e){ console.error(e); }
+      };
+      es.onerror = (e) => { es.close(); reject(new Error("SSE 连接中断")); };
+    });
+
+  } catch (e) {
+    console.error(e); alert(e.message || e);
+  } finally {
+    btn.disabled = false; btn.textContent = old;
   }
-  txt.textContent = "完成："+txt.textContent;
-}
+});
 </script>
-</body>
-</html>
+</body></html>
