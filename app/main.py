@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import FastAPI, Request, UploadFile, File, Form, Depends, HTTPException, Query
-from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, PlainTextResponse, JSONResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, PlainTextResponse, JSONResponse, Response  # ★ 加入 Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
@@ -24,6 +24,10 @@ PDF_DIR = os.path.join(DATA_DIR, "pdfs")
 UP_DIR  = os.path.join(DATA_DIR, "uploads")
 os.makedirs(PDF_DIR, exist_ok=True)
 os.makedirs(UP_DIR,  exist_ok=True)
+
+# PDF每日归档ZIP目录
+ZIP_DIR = os.path.join(DATA_DIR, "pdf_zips")
+os.makedirs(ZIP_DIR, exist_ok=True)
 
 # 确保静态/更新/运行时目录存在（防止导入时报错）
 os.makedirs(os.path.join(BASE_DIR, "app", "static"), exist_ok=True)
@@ -49,15 +53,6 @@ except Exception:
 
 from app.admin_extras import router as admin_extras_router
 app.include_router(admin_extras_router)
-
-# —— 启动时初始化数据库（避免并发重复建表） ——
-@app.on_event("startup")
-def _init_db():
-    try:
-        Base.metadata.create_all(bind=engine, checkfirst=True)
-    except Exception as e:
-        print("DB init warn:", e)
-
 
 # -------- 数据库 --------
 engine = create_engine(
@@ -103,10 +98,13 @@ class TrackingFile(Base):
     file_path = Column(Text)
     uploaded_at = Column(DateTime, default=datetime.utcnow)
 
-# Base.metadata.create_all(bind=engine)
-os.makedirs(os.path.join(BASE_DIR, "updates"), exist_ok=True)
-os.makedirs(os.path.join(BASE_DIR, "runtime"), exist_ok=True)
-
+# —— 启动时初始化数据库（避免并发重复建表） ——
+@app.on_event("startup")
+def _init_db():
+    try:
+        Base.metadata.create_all(bind=engine, checkfirst=True)
+    except Exception as e:
+        print("DB init warn:", e)
 
 # -------- 工具函数 --------
 def now_iso(): return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -174,6 +172,182 @@ def write_mapping_json(db):
     with open(fp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+# ===== 新增：PDF 每日ZIP归档工具与API =====
+def _date_str(d: datetime.date) -> str:
+    try: return d.strftime("%Y-%m-%d")
+    except Exception: return str(d)
+
+def _date_str_compact(d: datetime.date) -> str:
+    try: return d.strftime("%Y%m%d")
+    except Exception: return str(d).replace("-","")
+
+def build_daily_pdf_zip(db, target_date: Optional[datetime.date]=None) -> str:
+    """为target_date（默认今天，UTC）重建一个仅包含当日上传/更新PDF的zip。
+    返回zip文件绝对路径。"""
+    if target_date is None: target_date = datetime.utcnow().date()
+    start_dt = datetime(target_date.year, target_date.month, target_date.day)
+    end_dt   = start_dt + timedelta(days=1)
+    # 查询当日上传/更新的 TrackingFile
+    files = db.query(TrackingFile).filter(
+        TrackingFile.uploaded_at >= start_dt,
+        TrackingFile.uploaded_at <  end_dt
+    ).all()
+    # 若当日无文件，仍返回现有zip路径（可能不存在）
+    zip_name = f"pdfs-{_date_str_compact(target_date)}.zip"
+    fp_zip   = os.path.join(ZIP_DIR, zip_name)
+    if not files:
+        return fp_zip
+    # 安全写入（临时文件→原子替换）
+    tmp_zip = fp_zip + ".tmp"
+    try:
+        with zipfile.ZipFile(tmp_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
+            for f in files:
+                try:
+                    if not f.file_path or (not os.path.exists(f.file_path)): continue
+                    arcname = f"{canon_tracking(f.tracking_no)}.pdf"
+                    z.write(f.file_path, arcname)
+                except Exception:
+                    # 忽略单个文件异常，继续其他文件
+                    pass
+        os.makedirs(os.path.dirname(fp_zip), exist_ok=True)
+        if os.path.exists(fp_zip):
+            try: os.replace(tmp_zip, fp_zip)
+            except Exception:
+                try: os.remove(fp_zip)
+                except Exception: pass
+                os.replace(tmp_zip, fp_zip)
+        else:
+            os.replace(tmp_zip, fp_zip)
+    finally:
+        try:
+            if os.path.exists(tmp_zip): os.remove(tmp_zip)
+        except Exception: pass
+    return fp_zip
+
+def list_pdf_zip_dates() -> list:
+    """扫描 ZIP_DIR 下所有 pdfs-YYYYMMDD.zip，返回按日期倒序的列表。"""
+    out=[]
+    if not os.path.isdir(ZIP_DIR): return out
+    for name in os.listdir(ZIP_DIR):
+        if not name.startswith("pdfs-") or not name.endswith(".zip"): continue
+        dpart=name[len("pdfs-"):-len(".zip")]
+        # 接受 YYYYMMDD 或 YYYY-MM-DD 两种
+        if len(dpart)==8 and dpart.isdigit():
+            d=f"{dpart[0:4]}-{dpart[4:6]}-{dpart[6:8]}"
+        elif len(dpart)==10 and dpart[4]=='-' and dpart[7]=='-':
+            d=dpart
+        else:
+            continue
+        fp=os.path.join(ZIP_DIR,name)
+        try: size=os.path.getsize(fp)
+        except Exception: size=0
+        out.append({"date": d, "zip_name": name, "size": size})
+    # 按日期倒序
+    try:
+        out.sort(key=lambda x: x.get("date",""), reverse=True)
+    except Exception:
+        pass
+    return out
+
+# ★★★ 新增：为 daily ZIP 计算 ETag / SHA256 ★★★
+def _calc_etag(fp: str) -> str:
+    """用 mtime+size 生成弱 ETag，避免频繁计算大文件哈希。"""
+    st = os.stat(fp)
+    return f'W/"{int(st.st_mtime)}-{st.st_size}"'
+
+def _calc_sha256(fp: str) -> str:
+    """计算 sha256（失败则返回空串）。"""
+    try:
+        import hashlib
+        h = hashlib.sha256()
+        with open(fp, "rb") as f:
+            for chunk in iter(lambda: f.read(1024*1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return ""
+
+# ------------------ API：ZIP 日期与下载 ------------------
+@app.get("/api/v1/pdf-zips/dates")
+def api_pdf_zip_dates(code: str = Query(""), db=Depends(get_db)):
+    c = verify_code(db, code)
+    if not c: raise HTTPException(status_code=403, detail="invalid code")
+    # 先统计数据库中有变更的所有日期（UTC）
+    dates_db=set()
+    try:
+        rows=db.query(TrackingFile.uploaded_at).all()
+        for (u,) in rows:
+            if not u: continue
+            dstr=u.strftime("%Y-%m-%d")
+            dates_db.add(dstr)
+    except Exception:
+        pass
+    # 已有zip文件列表
+    lst=list_pdf_zip_dates()
+    dates_zip={x.get("date") for x in lst}
+    # 将数据库日期合并进去（不存在的 size 置 0，name 按规范生成）
+    for d in sorted(dates_db):
+        if d not in dates_zip:
+            lst.append({"date": d, "zip_name": f"pdfs-{d.replace('-','')}.zip", "size": 0})
+    # 顺带确保当天的zip存在（如果当天有文件）
+    try:
+        today=datetime.utcnow().date()
+        if today.strftime("%Y-%m-%d") in dates_db:
+            build_daily_pdf_zip(db, today)
+    except Exception:
+        pass
+    # 最终按日期倒序返回
+    try:
+        lst.sort(key=lambda x: x.get("date",""), reverse=True)
+    except Exception:
+        pass
+    return {"dates": lst}
+
+@app.get("/api/v1/pdf-zips/daily")
+def api_pdf_zip_daily(
+    date: Optional[str] = Query(None),
+    code: str = Query(""),
+    request: Request = None,
+    db=Depends(get_db),
+):
+    c = verify_code(db, code)
+    if not c: raise HTTPException(status_code=403, detail="invalid code")
+    # 解析日期
+    if not date:
+        d = datetime.utcnow().date()
+    else:
+        s=str(date).strip()
+        if re.fullmatch(r"\d{8}", s):  # YYYYMMDD
+            d=datetime(int(s[0:4]), int(s[4:6]), int(s[6:8])).date()
+        elif re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+            yr=int(s[0:4]); mo=int(s[5:7]); dy=int(s[8:10]); d=datetime(yr,mo,dy).date()
+        else:
+            raise HTTPException(status_code=400, detail="invalid date")
+    # 若zip不存在，尝试构建
+    fp = os.path.join(ZIP_DIR, f"pdfs-{_date_str_compact(d)}.zip")
+    if not os.path.exists(fp):
+        try:
+            fp = build_daily_pdf_zip(db, d)
+        except Exception:
+            pass
+    if not os.path.exists(fp):
+        raise HTTPException(status_code=404, detail="zip not found")
+
+    # —— ETag / If-None-Match / 可选 SHA256 —— #
+    etag = _calc_etag(fp)
+    inm = (request.headers.get("if-none-match") or "").strip() if request else ""
+    if inm == etag:
+        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
+
+    sha = _calc_sha256(fp)  # 计算失败则返回空串
+    headers = {"ETag": etag, "Cache-Control": "no-cache"}
+    if sha:
+        headers["X-Checksum-Sha256"] = sha
+
+    return FileResponse(fp, media_type="application/zip",
+                        filename=os.path.basename(fp), headers=headers)
+
+# ------------------ 其它工具与后台 ------------------
 def is_locked(c: ClientAuth) -> bool:
     return bool(c.locked_until and datetime.utcnow() < c.locked_until)
 
@@ -296,7 +470,6 @@ def git_status_info(base: str):
 def update_page(request: Request, db=Depends(get_db)):
     require_admin(request, db)
     info = git_status_info(BASE_DIR)
-    # 构造一条安全的一键升级命令（你原来那条仍有效）
     oneliner = "bash <(curl -fsSL https://raw.githubusercontent.com/aidaddydog/huandan.server/main/scripts/bootstrap_online.sh)"
     return templates.TemplateResponse("update.html", {"request": request, "info": info, "oneliner": oneliner})
 
@@ -380,7 +553,6 @@ def templates_save(request: Request, path: str = Form(...), content: str = Form(
         f.write(content)
     # 让 jinja 变更立即可见（auto_reload 已启）
     return RedirectResponse(f"/admin/templates/edit?path={path}&saved=1", status_code=302)
-
 
 # ---- 导入订单（3步：文件→列映射→预览与确认） ----
 @app.get("/admin/upload-orders", response_class=HTMLResponse)
@@ -476,6 +648,12 @@ async def upload_pdf_zip(request: Request, zipfile_upload: UploadFile = File(...
                     tf.file_path = target; tf.uploaded_at = datetime.utcnow()
                 saved += 1
         db.commit()
+        # 新增：每次上传后重建当日ZIP归档，便于客户端按日同步
+        try:
+            build_daily_pdf_zip(db, datetime.utcnow().date())
+        except Exception:
+            pass
+
         set_mapping_version(db); write_mapping_json(db)
     except Exception as e:
         db.rollback()
@@ -674,6 +852,3 @@ def api_runtime_sumatra(arch: str = "win64", code: str = Query(""), db=Depends(g
     fp = os.path.join(BASE_DIR, "runtime", fname)
     if not os.path.exists(fp): raise HTTPException(status_code=404, detail="runtime not found on server")
     return FileResponse(fp, media_type="application/octet-stream", filename=fname)
-    
-from app.admin_extras import router as admin_extras_router
-app.include_router(admin_extras_router)
