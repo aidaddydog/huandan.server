@@ -1,77 +1,19 @@
-<!-- app/templates/zips.html -->
-<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8"/>
-  <title>ZIP 包列表</title>
-  <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;padding:16px}
-    table{border-collapse:collapse;width:100%}
-    th,td{border-bottom:1px solid #eee;padding:8px;text-align:left}
-    .btn{display:inline-block;padding:6px 10px;border:1px solid #333;background:#111;color:#fff;border-radius:4px;text-decoration:none}
-    .muted{color:#666}
-    .bar{height:8px;background:#eee;border-radius:4px;overflow:hidden}
-    .bar>i{display:block;height:100%;background:#111;width:0%}
-    .small{font-size:12px}
-  </style>
-</head>
+<!doctype html><html><head><meta charset="utf-8"><title>ZIP 包列表</title></head>
 <body>
+{% include "_nav.html" %}
+<div style="padding:16px">
   <h2>ZIP 包列表</h2>
-  <p class="muted">列出 <code>pdf_zips/</code> 下每日归档；可重建、下载。</p>
-  <table>
-    <thead>
-      <tr><th>日期</th><th>文件</th><th>大小</th><th>修改时间</th><th>ETag</th><th>操作</th></tr>
-    </thead>
-    <tbody>
+  <table border="1" cellspacing="0" cellpadding="6">
+    <tr><th>日期</th><th>文件名</th><th>大小</th><th>下载</th></tr>
     {% for r in rows %}
       <tr>
         <td>{{ r.date }}</td>
         <td>{{ r.zip_name }}</td>
-        <td>{{ ('%.2f MB' % (r.size/1048576)) if r.size else '-' }}</td>
-        <td>{{ r.mtime_str }}</td>
-        <td class="small">{{ r.etag or '-' }}</td>
-        <td>
-          <a class="btn" href="/admin/zip/download?date={{ r.date }}">下载</a>
-          <button class="btn" onclick="rebuild('{{ r.date }}')">重建</button>
-        </td>
+        <td>{{ (r.size or 0) // 1024 // 1024 }} MB</td>
+        <td><a href="/api/v1/pdf-zips/daily?date={{ r.date }}&code=000000" target="_blank">下载</a></td>
       </tr>
     {% endfor %}
-    </tbody>
   </table>
-
-  <h3>进度</h3>
-  <div class="bar"><i id="pbar"></i></div>
-  <p id="ptext" class="small muted">等待任务...</p>
-
-<script>
-async function rebuild(dateStr){
-  const pid = await newProgress("rebuild_zip");
-  const fd  = new FormData();
-  fd.append("date", dateStr);
-  fd.append("pid", pid);
-  const resp = await fetch("/admin/zips/rebuild", {method:"POST", body:fd});
-  if(!resp.ok){ alert("提交失败"); return; }
-  poll(pid);
-}
-
-async function newProgress(tag){
-  const r = await fetch("/admin/progress/new?tag="+encodeURIComponent(tag));
-  const j = await r.json(); return j.id;
-}
-
-async function poll(pid){
-  const bar=document.getElementById("pbar");
-  const txt=document.getElementById("ptext");
-  while(true){
-    const r=await fetch("/admin/progress/get?id="+pid,{cache:"no-store"});
-    const s=await r.json();
-    if(s.missing){ txt.textContent="任务不存在"; return; }
-    bar.style.width = (s.pct||0)+"%";
-    txt.textContent = (s.stage||"-")+"："+(s.note||"")+"（"+(s.pct||0)+"%）";
-    if(s.done){ break; }
-    await new Promise(r=>setTimeout(r,800));
-  }
-}
-</script>
-</body>
-</html>
+  <p style="color:#666">* 下载链接里 code=000000 仅为演示，实际请替换为有效 6 位访问码。</p>
+</div>
+</body></html>
