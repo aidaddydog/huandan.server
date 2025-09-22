@@ -1,11 +1,12 @@
 # app/main.py
 import os, zipfile, re, shutil, time, math, json, traceback
 import subprocess, shlex
+import hashlib
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import FastAPI, Request, UploadFile, File, Form, Depends, HTTPException, Query
-from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, PlainTextResponse, JSONResponse
+from fastapi import FastAPI, Request, UploadFile, File, Form, Depends, HTTPException, Query, Header
+from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, PlainTextResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
@@ -28,6 +29,34 @@ os.makedirs(UP_DIR,  exist_ok=True)
 # PDF每日归档ZIP目录（新增功能）
 ZIP_DIR = os.path.join(DATA_DIR, "pdf_zips")
 os.makedirs(ZIP_DIR, exist_ok=True)
+
+# 新增：ZIP 清单与校验工具（用于生成 ETag/SHA256 并支持 304 增量下载）
+ZIP_MANIFEST = os.path.join(ZIP_DIR, "zip_manifest.json")
+
+def _read_zip_manifest():
+    try:
+        with open(ZIP_MANIFEST, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"items": {}}
+
+def _write_zip_manifest(d: dict):
+    os.makedirs(ZIP_DIR, exist_ok=True)
+    tmp = os.path.join(ZIP_DIR, f"zip_manifest.{int(time.time())}.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, ZIP_MANIFEST)
+
+def _file_sha256(fp: str) -> str:
+    h = hashlib.sha256()
+    with open(fp, "rb") as f:
+        for chunk in iter(lambda: f.read(1024*1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def _httpdate(ts: float) -> str:
+    import email.utils
+    return email.utils.formatdate(ts, usegmt=True)
 
 # 确保静态/更新/运行时目录存在（防止导入时报错）
 os.makedirs(os.path.join(BASE_DIR, "app", "static"), exist_ok=True)
@@ -295,7 +324,7 @@ def api_pdf_zip_dates(code: str = Query(""), db=Depends(get_db)):
 
 # API：下载某日ZIP（date=YYYY-MM-DD 或 YYYYMMDD；若不存在则尝试即时构建）
 @app.get("/api/v1/pdf-zips/daily")
-def api_pdf_zip_daily(date: Optional[str] = Query(None), code: str = Query(""), db=Depends(get_db)):
+def api_pdf_zip_daily(date: Optional[str] = Query(None), code: str = Query(""), if_none_match: Optional[str] = Header(default=None), db=Depends(get_db)):
     c = verify_code(db, code)
     if not c: raise HTTPException(status_code=403, detail="invalid code")
     # 解析日期
@@ -318,7 +347,33 @@ def api_pdf_zip_daily(date: Optional[str] = Query(None), code: str = Query(""), 
             pass
     if not os.path.exists(fp):
         raise HTTPException(status_code=404, detail="zip not found")
-    return FileResponse(fp, media_type="application/zip", filename=os.path.basename(fp))
+        # 读取/补全校验信息
+    try:
+        man = _read_zip_manifest()
+        dstr = _date_str(d)
+        meta = (man.get("items", {}) or {}).get(dstr)
+        if not isinstance(meta, dict):
+            st = os.stat(fp); sha = _file_sha256(fp)
+            meta = {"sha256": sha, "size": int(st.st_size), "mtime": int(st.st_mtime)}
+            man.setdefault("items", {})[dstr] = meta
+            _write_zip_manifest(man)
+        sha = meta.get("sha256")
+    except Exception:
+        st = os.stat(fp)
+        sha = _file_sha256(fp)
+    etag_value = f'"{sha}"'; inm = (if_none_match or "").strip().strip('"')
+    if inm and sha and (inm == sha):
+        return Response(status_code=304)
+    st = os.stat(fp)
+    headers = {
+        "ETag": etag_value,
+        "X-Checksum-SHA256": sha or "",
+        "Last-Modified": _httpdate(st.st_mtime),
+        "Content-Length": str(st.st_size),
+        "Cache-Control": "no-cache",
+        "Content-Type": "application/zip",
+    }
+    return FileResponse(fp, media_type="application/zip", filename=os.path.basename(fp), headers=headers)
 
 def is_locked(c: ClientAuth) -> bool:
     return bool(c.locked_until and datetime.utcnow() < c.locked_until)
