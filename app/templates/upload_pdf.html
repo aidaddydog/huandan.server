@@ -1,36 +1,40 @@
 <!doctype html><html><head><meta charset="utf-8"><title>PDF导入</title></head>
 <body>
 {% include "_nav.html" %}
-<div style="padding:16px;max-width:720px">
-  <h2>PDF 导入</h2>
-  <input type="file" id="zipInput" accept=".zip">
-  <button id="btn" style="margin-left:8px;padding:6px 12px">确认导入</button>
-
-  <div id="uploadBox" style="margin-top:12px;display:none">
-    <div>上传：<span id="upPct">0%</span></div>
-    <progress id="upProg" value="0" max="100" style="width:100%"></progress>
+<div class="container">
+  <div class="card" style="max-width:720px; margin:0 auto;">
+    <h2 style="margin-top:0;">PDF 导入</h2>
+    <div class="row">
+      <input type="file" id="zipInput" accept=".zip" class="input" style="flex:2">
+      <button id="btn" class="btn primary" style="flex:1"><span class="spinner"></span><span>确认导入</span></button>
+    </div>
+    <div id="uploadBox" style="margin-top:12px; display:none;">
+      <div class="row" style="gap:8px;">
+        <div style="width:60px; color:#cfd3da;">上传</div>
+        <progress id="upProg" value="0" max="100"></progress>
+        <div style="width:40px; text-align:right;"><span id="upPct">0%</span></div>
+      </div>
+    </div>
+    <pre id="log" class="card" style="margin-top:12px; background:#0f1114;"></pre>
   </div>
-
-  <pre id="log" style="margin-top:12px;background:#f7f7f7;padding:10px;height:220px;overflow:auto"></pre>
 </div>
-
 <script>
-const $ = sel => document.querySelector(sel);
-const log = (m) => { const pre = $("#log"); pre.textContent += m + "\n"; pre.scrollTop = pre.scrollHeight; };
+const $ = s => document.querySelector(s);
+const log = m => { const pre=$("#log"); pre.textContent += m+"\n"; pre.scrollTop = pre.scrollHeight; };
 const btn = $("#btn");
 
 btn.addEventListener("click", async () => {
   const f = $("#zipInput").files[0];
   if (!f) { alert("请选择 ZIP 文件"); return; }
-  btn.disabled = true; const old = btn.textContent; btn.textContent = "处理中… ⏳";
+  btn.classList.add("is-loading"); btn.disabled = true;
   $("#uploadBox").style.display = "block"; $("#upPct").textContent = "0%"; $("#upProg").value = 0;
   $("#log").textContent = "";
 
   try {
-    // 1) 先上传，仅用于显示“上传进度”
+    // 1) 上传
     const fd = new FormData(); fd.append("zipfile_upload", f);
-    const xhr = new XMLHttpRequest();
     const tmpName = await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
       xhr.open("POST", "/admin/api/upload-pdf-file");
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) {
@@ -39,10 +43,11 @@ btn.addEventListener("click", async () => {
         }
       };
       xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          try { const j = JSON.parse(xhr.responseText); if (j.ok) resolve(j.tmp); else reject(new Error("上传失败")); }
-          catch(e){ reject(e); }
-        } else reject(new Error("上传接口返回 " + xhr.status));
+        try {
+          const j = JSON.parse(xhr.responseText || "{}");
+          if (xhr.status>=200 && xhr.status<300 && j.ok) resolve(j.tmp);
+          else reject(new Error("上传失败: "+xhr.status));
+        } catch(e){ reject(e); }
       };
       xhr.onerror = () => reject(new Error("网络错误"));
       xhr.send(fd);
@@ -77,7 +82,7 @@ btn.addEventListener("click", async () => {
   } catch (e) {
     console.error(e); alert(e.message || e);
   } finally {
-    btn.disabled = false; btn.textContent = old;
+    btn.classList.remove("is-loading"); btn.disabled = false;
   }
 });
 </script>

