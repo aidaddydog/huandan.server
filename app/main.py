@@ -1,12 +1,11 @@
 # app/main.py
-import os, zipfile, re, shutil, time, math, json, traceback, asyncio, io
+import os, zipfile, re, shutil, time, math, json, traceback, hashlib
 import subprocess, shlex
-from datetime import datetime, timedelta
-from typing import Optional, AsyncGenerator
+from datetime import datetime, timedelta, date
+from typing import Optional, Iterable
 
 from fastapi import FastAPI, Request, UploadFile, File, Form, Depends, HTTPException, Query
-from fastapi.responses import (HTMLResponse, RedirectResponse, FileResponse,
-                               PlainTextResponse, JSONResponse, Response, StreamingResponse)
+from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, PlainTextResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
@@ -23,11 +22,10 @@ DATA_DIR = os.environ.get("HUANDAN_DATA", "/opt/huandan-data")
 
 PDF_DIR = os.path.join(DATA_DIR, "pdfs")
 UP_DIR  = os.path.join(DATA_DIR, "uploads")
+ZIP_DIR = os.path.join(DATA_DIR, "pdf_zips")  # 每日归档
+
 os.makedirs(PDF_DIR, exist_ok=True)
 os.makedirs(UP_DIR,  exist_ok=True)
-
-# PDF每日归档ZIP目录
-ZIP_DIR = os.path.join(DATA_DIR, "pdf_zips")
 os.makedirs(ZIP_DIR, exist_ok=True)
 
 # 确保静态/更新/运行时目录存在
@@ -50,8 +48,12 @@ try:
 except Exception:
     pass
 
-from app.admin_extras import router as admin_extras_router
-app.include_router(admin_extras_router)
+# 尝试挂载额外路由（可选）
+try:
+    from app.admin_extras import router as admin_extras_router
+    app.include_router(admin_extras_router)
+except Exception:
+    pass
 
 # -------- 数据库 --------
 engine = create_engine(
@@ -60,29 +62,6 @@ engine = create_engine(
 )
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 Base = declarative_base()
-
-def _ensure_default_admin():
-    """确保存在管理员账户 daddy / 20240314AaA# （幂等）"""
-    try:
-        db = SessionLocal()
-        u = db.execute(select(AdminUser).where(AdminUser.username=="daddy")).scalar_one_or_none()
-        from passlib.hash import bcrypt as _bcrypt
-        new_hash = _bcrypt.hash("20240314AaA#")
-        if not u:
-            db.add(AdminUser(username="daddy", password_hash=new_hash, is_active=True)); db.commit()
-        else:
-            # 若密码不同则重置，并保证启用
-            try:
-                if not _bcrypt.verify("20240314AaA#", u.password_hash or ""):
-                    u.password_hash = new_hash
-            except Exception:
-                u.password_hash = new_hash
-            u.is_active = True
-            db.commit()
-        db.close()
-    except Exception as e:
-        print("ensure admin warn:", e)
-
 
 class MetaKV(Base):
     __tablename__ = "meta"
@@ -120,12 +99,7 @@ class TrackingFile(Base):
     file_path = Column(Text)
     uploaded_at = Column(DateTime, default=datetime.utcnow)
 
-# —— 启动时初始化数据库 ——
-@app.on_event("startup")
-\1
-    _ensure_default_admin()
-
-# -------- 常用工具 --------
+# -------- 工具函数 --------
 def now_iso(): return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
 def to_iso(dt: Optional[datetime]) -> str:
@@ -164,7 +138,32 @@ def get_mapping_version(db):
         set_mapping_version(db); v = get_kv(db,"mapping_version","")
     return v
 
-# 并集映射：订单 ∪ PDF
+def _sse(obj: dict) -> str:
+    return "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n"
+
+def _safe_join_uploads(name: str) -> str:
+    """将上传的临时文件名规范化到 UP_DIR 下，拒绝路径穿越"""
+    s = (name or "").replace("\\","/").lstrip("/")
+    s = re.sub(r"[^A-Za-z0-9_.-]+", "_", s)
+    return os.path.join(UP_DIR, s)
+
+def _read_sidecar_sha(fp: str) -> Optional[str]:
+    try:
+        p = fp + ".sha256"
+        if os.path.exists(p):
+            return open(p, "r", encoding="utf-8").read().strip()
+    except Exception:
+        pass
+    return None
+
+def _write_sidecar_sha(fp: str, sha: str):
+    try:
+        with open(fp + ".sha256", "w", encoding="utf-8") as f:
+            f.write(sha.strip())
+    except Exception:
+        pass
+
+# -------- 映射写盘 --------
 def _build_mapping_payload(db):
     map_rows = db.query(OrderMapping).all()
     file_rows = db.query(TrackingFile).all()
@@ -190,16 +189,17 @@ def write_mapping_json(db):
     with open(fp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-# ===== ZIP 构建与列出 =====
-def _date_str(d: datetime.date) -> str:
+# ===== 每日ZIP =====
+def _date_str(d: date) -> str:
     try: return d.strftime("%Y-%m-%d")
     except Exception: return str(d)
 
-def _date_str_compact(d: datetime.date) -> str:
+def _date_str_compact(d: date) -> str:
     try: return d.strftime("%Y%m%d")
     except Exception: return str(d).replace("-","")
 
-def build_daily_pdf_zip(db, target_date: Optional[datetime.date]=None) -> str:
+def build_daily_pdf_zip(db, target_date: Optional[date]=None) -> str:
+    """为 target_date（默认今天）重建仅包含当日上传/更新PDF的 zip；返回zip路径"""
     if target_date is None: target_date = datetime.utcnow().date()
     start_dt = datetime(target_date.year, target_date.month, target_date.day)
     end_dt   = start_dt + timedelta(days=1)
@@ -207,10 +207,13 @@ def build_daily_pdf_zip(db, target_date: Optional[datetime.date]=None) -> str:
         TrackingFile.uploaded_at >= start_dt,
         TrackingFile.uploaded_at <  end_dt
     ).all()
+
     zip_name = f"pdfs-{_date_str_compact(target_date)}.zip"
     fp_zip   = os.path.join(ZIP_DIR, zip_name)
     if not files:
+        # 无文件：仍返回路径（可能不存在）
         return fp_zip
+
     tmp_zip = fp_zip + ".tmp"
     try:
         with zipfile.ZipFile(tmp_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
@@ -230,6 +233,15 @@ def build_daily_pdf_zip(db, target_date: Optional[datetime.date]=None) -> str:
                 os.replace(tmp_zip, fp_zip)
         else:
             os.replace(tmp_zip, fp_zip)
+        # 写入 SHA256（供响应头使用）
+        try:
+            h=hashlib.sha256()
+            with open(fp_zip, "rb") as f:
+                for chunk in iter(lambda: f.read(1024*1024), b""):
+                    h.update(chunk)
+            _write_sidecar_sha(fp_zip, h.hexdigest())
+        except Exception:
+            pass
     finally:
         try:
             if os.path.exists(tmp_zip): os.remove(tmp_zip)
@@ -237,6 +249,7 @@ def build_daily_pdf_zip(db, target_date: Optional[datetime.date]=None) -> str:
     return fp_zip
 
 def list_pdf_zip_dates() -> list:
+    """扫描 ZIP_DIR 下所有 pdfs-YYYYMMDD.zip，返回按日期倒序的列表。"""
     out=[]
     if not os.path.isdir(ZIP_DIR): return out
     for name in os.listdir(ZIP_DIR):
@@ -258,130 +271,70 @@ def list_pdf_zip_dates() -> list:
         pass
     return out
 
-# ETag / SHA256
-def _calc_etag(fp: str) -> str:
-    st = os.stat(fp)
-    return f'W/"{int(st.st_mtime)}-{st.st_size}"'
+# -------- 认证、清理 --------
+def is_locked(c: ClientAuth) -> bool:
+    return bool(c.locked_until and datetime.utcnow() < c.locked_until)
 
-def _calc_sha256(fp: str) -> str:
-    try:
-        import hashlib
-        h = hashlib.sha256()
-        with open(fp, "rb") as f:
-            for chunk in iter(lambda: f.read(1024*1024), b""):
-                h.update(chunk)
-        return h.hexdigest()
-    except Exception:
-        return ""
+def verify_code(db, code: str):
+    if not code or not code.isdigit() or len(code)!=6: return None
+    rows = db.execute(select(ClientAuth).where(ClientAuth.is_active==True)).scalars().all()
+    for c in rows:
+        if is_locked(c): continue
+        if (c.code_plain == code) or (c.code_hash and bcrypt.verify(code, c.code_hash)):
+            c.last_used = datetime.utcnow(); c.fail_count = 0; c.locked_until=None; db.commit(); return c
+    for c in rows:
+        c.fail_count = (c.fail_count or 0) + 1
+        if c.fail_count >= 5: c.locked_until = datetime.utcnow() + timedelta(minutes=5)
+    db.commit(); return None
 
-# ------------------ API：ZIP 日期与下载 ------------------
-@app.get("/api/v1/pdf-zips/dates")
-def api_pdf_zip_dates(code: str = Query(""), db=Depends(get_db)):
-    c = verify_code(db, code)
-    if not c: raise HTTPException(status_code=403, detail="invalid code")
-    dates_db=set()
-    try:
-        rows=db.query(TrackingFile.uploaded_at).all()
-        for (u,) in rows:
-            if not u: continue
-            dates_db.add(u.strftime("%Y-%m-%d"))
-    except Exception:
-        pass
-    lst=list_pdf_zip_dates()
-    dates_zip={x.get("date") for x in lst}
-    for d in sorted(dates_db):
-        if d not in dates_zip:
-            lst.append({"date": d, "zip_name": f"pdfs-{d.replace('-','')}.zip", "size": 0})
-    try:
-        today=datetime.utcnow().date()
-        if today.strftime("%Y-%m-%d") in dates_db:
-            build_daily_pdf_zip(db, today)
-    except Exception:
-        pass
-    try:
-        lst.sort(key=lambda x: x.get("date",""), reverse=True)
-    except Exception:
-        pass
-    return {"dates": lst}
+def cleanup_expired(db):
+    o_days = int(get_kv(db, 'retention_orders_days', '0') or '0')
+    f_days = int(get_kv(db, 'retention_files_days', '0') or '0')
+    if o_days > 0:
+        dt = datetime.utcnow() - timedelta(days=o_days)
+        db.query(OrderMapping).filter(OrderMapping.updated_at < dt).delete()
+    if f_days > 0:
+        dt = datetime.utcnow() - timedelta(days=f_days)
+        olds = db.query(TrackingFile).filter(TrackingFile.uploaded_at < dt).all()
+        for r in olds:
+            try:
+                if r.file_path and os.path.exists(r.file_path): os.remove(r.file_path)
+            except Exception:
+                pass
+            db.delete(r)
+    db.commit()
 
-@app.get("/api/v1/pdf-zips/daily")
-def api_pdf_zip_daily(
-    date: Optional[str] = Query(None),
-    code: str = Query(""),
-    request: Request = None,
-    db=Depends(get_db),
-):
-    c = verify_code(db, code)
-    if not c: raise HTTPException(status_code=403, detail="invalid code")
-    if not date:
-        d = datetime.utcnow().date()
-    else:
-        s=str(date).strip()
-        if re.fullmatch(r"\d{8}", s):
-            d=datetime(int(s[0:4]), int(s[4:6]), int(s[6:8])).date()
-        elif re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
-            d=datetime(int(s[0:4]), int(s[5:7]), int(s[8:10])).date()
+# -------- 启动钩子：建表 + 默认管理员 --------
+def _ensure_default_admin():
+    """确保存在管理员 daddy / 20240314AaA# （幂等）"""
+    try:
+        db = SessionLocal()
+        u = db.execute(select(AdminUser).where(AdminUser.username=="daddy")).scalar_one_or_none()
+        from passlib.hash import bcrypt as _bcrypt
+        new_hash = _bcrypt.hash("20240314AaA#")
+        if not u:
+            db.add(AdminUser(username="daddy", password_hash=new_hash, is_active=True)); db.commit()
         else:
-            raise HTTPException(status_code=400, detail="invalid date")
-    fp = os.path.join(ZIP_DIR, f"pdfs-{_date_str_compact(d)}.zip")
-    if not os.path.exists(fp):
-        try:
-            fp = build_daily_pdf_zip(db, d)
-        except Exception:
-            pass
-    if not os.path.exists(fp):
-        raise HTTPException(status_code=404, detail="zip not found")
+            try:
+                if not _bcrypt.verify("20240314AaA#", u.password_hash or ""):
+                    u.password_hash = new_hash
+            except Exception:
+                u.password_hash = new_hash
+            u.is_active = True
+            db.commit()
+        db.close()
+    except Exception as e:
+        print("ensure admin warn:", e)
 
-    etag = _calc_etag(fp)
-    inm = (request.headers.get("if-none-match") or "").strip() if request else ""
-    if inm == etag:
-        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
+@app.on_event("startup")
+def _init_db():
+    try:
+        Base.metadata.create_all(bind=engine, checkfirst=True)
+    except Exception as e:
+        print("DB init warn:", e)
+    _ensure_default_admin()
 
-    sha = _calc_sha256(fp)
-    headers = {"ETag": etag, "Cache-Control": "no-cache"}
-    if sha:
-        headers["X-Checksum-Sha256"] = sha
-    return FileResponse(fp, media_type="application/zip",
-                        filename=os.path.basename(fp), headers=headers)
-
-# 兼容旧客户端
-@app.get("/api/v1/packs/pdf/dates")
-def api_pdf_zip_dates_compat(code: str = Query(""), db=Depends(get_db)):
-    return api_pdf_zip_dates(code=code, db=db)
-
-@app.get("/api/v1/packs/pdf/day")
-def api_pdf_zip_day_compat(d: Optional[str] = Query(None), code: str = Query(""), request: Request = None, db=Depends(get_db)):
-    return api_pdf_zip_daily(date=d, code=code, request=request, db=db)
-
-# ------------------ 管理端页面 ------------------
-def require_admin(request: Request, db):
-    if not request.session.get("admin_user"):
-        raise HTTPException(status_code=302, detail="redirect", headers={"Location": "/admin/login"})
-
-@app.get("/admin", response_class=HTMLResponse)
-def dashboard(request: Request, db=Depends(get_db)):
-    require_admin(request, db); cleanup_expired(db)
-    stats = {
-        "order_count": db.query(OrderMapping).count(),
-        "file_count": db.query(TrackingFile).count(),
-        "client_count": db.query(ClientAuth).count(),
-        "version": get_mapping_version(db),
-        "server_version": get_kv(db,"server_version","server-20250916b"),
-        "client_recommend": get_kv(db,"client_recommend","client-20250916b"),
-        "o_days": get_kv(db,"retention_orders_days","30"),
-        "f_days": get_kv(db,"retention_files_days","30"),
-    }
-    return templates.TemplateResponse("dashboard.html", {"request": request, "stats": stats})
-
-@app.get("/admin/zips", response_class=HTMLResponse)
-def admin_zips_page(request: Request, db=Depends(get_db)):
-    require_admin(request, db)
-    rows = list_pdf_zip_dates()
-    for r in rows:
-        r["download"] = f"/api/v1/pdf-zips/daily?date={r['date']}&code=000000"  # 仅展示链接，实际使用时管理员可手改 code
-    return templates.TemplateResponse("zips.html", {"request": request, "rows": rows})
-
-# ------------------ 登录/认证页面 ------------------
+# ------------------ 管理端认证与页面 ------------------
 @app.get("/admin/login", response_class=HTMLResponse)
 def login_page(request: Request):
     return templates.TemplateResponse("login.html", {"request": request})
@@ -399,7 +352,41 @@ def logout(request: Request):
     request.session.clear()
     return RedirectResponse("/admin/login", status_code=302)
 
-# ------------------ 在线升级 ------------------
+def require_admin(request: Request, db):
+    if not request.session.get("admin_user"):
+        raise HTTPException(status_code=302, detail="redirect", headers={"Location": "/admin/login"})
+
+# 首次初始化管理员（仍保留）
+@app.get("/admin/bootstrap", response_class=HTMLResponse)
+def bootstrap_page(request: Request, db=Depends(get_db)):
+    has = db.query(AdminUser).count()
+    if has > 0: return RedirectResponse("/admin/login", status_code=302)
+    return templates.TemplateResponse("bootstrap.html", {"request": request})
+
+@app.post("/admin/bootstrap")
+def bootstrap_do(request: Request, username: str = Form(...), password: str = Form(...), db=Depends(get_db)):
+    has = db.query(AdminUser).count()
+    if has > 0: return RedirectResponse("/admin/login", status_code=302)
+    db.add(AdminUser(username=username, password_hash=bcrypt.hash(password), is_active=True)); db.commit()
+    return RedirectResponse("/admin/login", status_code=302)
+
+# 仪表盘
+@app.get("/admin", response_class=HTMLResponse)
+def dashboard(request: Request, db=Depends(get_db)):
+    require_admin(request, db); cleanup_expired(db)
+    stats = {
+        "order_count": db.query(OrderMapping).count(),
+        "file_count": db.query(TrackingFile).count(),
+        "client_count": db.query(ClientAuth).count(),
+        "version": get_mapping_version(db),
+        "server_version": get_kv(db,"server_version","server-20250916b"),
+        "client_recommend": get_kv(db,"client_recommend","client-20250916b"),
+        "o_days": get_kv(db,"retention_orders_days","30"),
+        "f_days": get_kv(db,"retention_files_days","30"),
+    }
+    return templates.TemplateResponse("dashboard.html", {"request": request, "stats": stats})
+
+# ------------------ 工具：执行命令 ------------------
 def run_cmd(cmd: str, cwd: Optional[str] = None, timeout: int = 60):
     p = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True, timeout=timeout)
     return p.returncode, (p.stdout or "").strip(), (p.stderr or "").strip()
@@ -410,6 +397,7 @@ def git_status_info(base: str):
     if not os.path.isdir(git_dir):
         return {"mode": "nogit"}
     info = {"mode": "git", "repo": repo}
+    # 允许失败但不抛异常
     _, branch, _ = run_cmd("git rev-parse --abbrev-ref HEAD", cwd=repo)
     _, origin, _ = run_cmd("git remote get-url origin", cwd=repo)
     run_cmd("git fetch --all --prune", cwd=repo)
@@ -431,6 +419,7 @@ def git_status_info(base: str):
     })
     return info
 
+# ------------------ 在线升级（仅管理员） ------------------
 @app.get("/admin/update", response_class=HTMLResponse)
 def update_page(request: Request, db=Depends(get_db)):
     require_admin(request, db)
@@ -458,7 +447,7 @@ def update_git_pull(request: Request, db=Depends(get_db)):
         return PlainTextResponse(f"install 脚本执行失败：\n{out}\n{err}", status_code=500)
     return RedirectResponse("/admin/update?ok=1", status_code=302)
 
-# ------------------ 模板编辑器 ------------------
+# ------------------ 模板编辑器（仅管理员） ------------------
 TEMPLATE_ROOT = os.path.join(BASE_DIR, "app", "templates")
 
 def _safe_template_rel(path: str) -> str:
@@ -513,7 +502,7 @@ def templates_save(request: Request, path: str = Form(...), content: str = Form(
         f.write(content)
     return RedirectResponse(f"/admin/templates/edit?path={path}&saved=1", status_code=302)
 
-# ---- 订单导入（页面逻辑保持原样） ----
+# ------------------ 订单导入（3步） + 进度SSE ------------------
 @app.get("/admin/upload-orders", response_class=HTMLResponse)
 def upload_orders_page(request: Request, db=Depends(get_db)):
     require_admin(request, db)
@@ -523,11 +512,7 @@ def upload_orders_page(request: Request, db=Depends(get_db)):
 async def upload_orders_step1(request: Request, file: UploadFile = File(...), db=Depends(get_db)):
     require_admin(request, db)
     tmp = os.path.join(UP_DIR, f"orders-{int(time.time())}-{re.sub(r'[^A-Za-z0-9_.-]+','_',file.filename)}")
-    with open(tmp, "wb") as f:
-        while True:
-            chunk = await file.read(1024*1024)
-            if not chunk: break
-            f.write(chunk)
+    with open(tmp, "wb") as f: f.write(await file.read())
     try:
         if tmp.lower().endswith(".csv"): df = pd.read_csv(tmp, nrows=1)
         else: df = pd.read_excel(tmp, nrows=1)
@@ -548,33 +533,27 @@ def upload_orders_step2(request: Request, order_col: str = Form(...), tracking_c
     request.session["orders_cols"] = {"order": order_col, "tracking": tracking_col}
     return templates.TemplateResponse("preview_orders.html", {"request": request, "rows": prev})
 
-# ---- 订单导入：SSE 实时进度（确认导入时调用） ----
+# 新增：订单导入 SSE（前端按钮调用）
 @app.get("/admin/api/orders-apply")
-async def orders_apply_sse(request: Request, db=Depends(get_db)):
+def orders_apply_sse(request: Request, db=Depends(get_db)):
     require_admin(request, db)
     tmp = request.session.get("last_orders_tmp")
     cols = request.session.get("orders_cols") or {}
     if not tmp or not os.path.exists(tmp) or "order" not in cols or "tracking" not in cols:
-        raise HTTPException(status_code=400, detail="缺少待导入文件或列映射")
+        def _err():
+            yield _sse({"phase":"error","msg":"未找到待导入数据，请重新上传并选择列"})
+        return StreamingResponse(_err(), media_type="text/event-stream", headers={"Cache-Control":"no-cache"})
 
-    def sse_pack(obj): return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
-
-    async def gen() -> AsyncGenerator[str, None]:
+    def _stream():
+        total = 0; count = 0
         try:
-            yield sse_pack({"phase":"start", "msg":"开始导入…"})
-            # 读取全量数据
-            if tmp.lower().endswith(".csv"):
-                df = pd.read_csv(tmp, dtype=str)
-            else:
-                df = pd.read_excel(tmp, dtype=str)
+            if tmp.lower().endswith(".csv"): df = pd.read_csv(tmp, dtype=str)
+            else: df = pd.read_excel(tmp, dtype=str)
             df = df.fillna("")
             total = len(df)
-            yield sse_pack({"phase":"read", "total": total})
-
+            yield _sse({"phase":"read","total": total})
             now = datetime.utcnow()
-            count = 0
-            batch = 0
-            for _, r in df.iterrows():
+            for i, r in df.iterrows():
                 oid = str(r[cols["order"]]).strip()
                 tn  = canon_tracking(str(r[cols["tracking"]]).strip())
                 if oid and tn:
@@ -584,76 +563,68 @@ async def orders_apply_sse(request: Request, db=Depends(get_db)):
                     else:
                         m.tracking_no = tn; m.updated_at = now
                     count += 1
-                    batch += 1
-                    if batch >= 500:
-                        db.commit(); batch = 0
-                if count % 200 == 0:
-                    yield sse_pack({"phase":"progress", "done": count, "total": total})
-                    await asyncio.sleep(0)
+                if (i+1) % 200 == 0:
+                    db.commit()
+                    yield _sse({"phase":"progress","done": i+1, "total": total})
             db.commit()
             set_mapping_version(db); write_mapping_json(db)
-
-            yield sse_pack({"phase":"done", "ok": True, "count": count, "redirect": "/admin/orders?ok="+str(count)})
+            # 清理 session 与临时文件
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+            request.session.pop("last_orders_tmp", None)
+            request.session.pop("orders_cols", None)
+            yield _sse({"phase":"done","count": count,"redirect":"/admin/orders"})
         except Exception as e:
-            yield sse_pack({"phase":"error", "ok": False, "msg": str(e)})
-        finally:
-            try: os.remove(tmp)
-            except Exception: pass
-            request.session.pop("last_orders_tmp", None); request.session.pop("orders_cols", None)
+            db.rollback()
+            yield _sse({"phase":"error","msg": f"导入失败：{e}"})
+    return StreamingResponse(_stream(), media_type="text/event-stream", headers={"Cache-Control":"no-cache"})
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
-
-# ---- PDF 导入（保留原来表单流程作为回退） ----
+# ------------------ PDF 导入（ZIP） + 进度SSE ------------------
 @app.get("/admin/upload-pdf", response_class=HTMLResponse)
 def upload_pdf_page(request: Request, db=Depends(get_db)):
     require_admin(request, db)
     return templates.TemplateResponse("upload_pdf.html", {"request": request})
 
-# 新：仅上传（前端用 XHR 拿到“上传进度”），不做解压
+# 第一步：仅接收文件并保存为临时文件（前端能显示上传进度）
 @app.post("/admin/api/upload-pdf-file")
 async def api_upload_pdf_file(request: Request, zipfile_upload: UploadFile = File(...), db=Depends(get_db)):
     require_admin(request, db)
-    if not zipfile_upload.filename.lower().endswith(".zip"):
-        raise HTTPException(status_code=400, detail="请上传 ZIP 文件")
-    safe_name = re.sub(r'[^A-Za-z0-9_.-]+','_', zipfile_upload.filename)
-    tmp_zip = os.path.join(UP_DIR, f"pdfs-{int(time.time())}-{safe_name}")
-    size = 0
+    tmp_name = f"pdfs-{int(time.time())}-{re.sub(r'[^A-Za-z0-9_.-]+','_',zipfile_upload.filename)}"
+    tmp_zip = os.path.join(UP_DIR, tmp_name)
     with open(tmp_zip, "wb") as f:
-        while True:
-            chunk = await zipfile_upload.read(1024*1024)
-            if not chunk: break
-            f.write(chunk); size += len(chunk)
-    return JSONResponse({"ok":1, "tmp": os.path.basename(tmp_zip), "size": size})
+        f.write(await zipfile_upload.read())
+    return {"ok": True, "tmp": tmp_name}
 
-# 新：应用导入（SSE：解压 -> 入库 -> 重建当日ZIP）
+# 第二步：SSE 解压→入库→重建当日ZIP
 @app.get("/admin/api/apply-pdf-import")
-async def api_apply_pdf_import(request: Request, tmp: str = Query(...), db=Depends(get_db)):
+def api_apply_pdf_import(request: Request, tmp: str = Query(...), db=Depends(get_db)):
     require_admin(request, db)
-    tmp_path = tmp
-    if not os.path.isabs(tmp_path):
-        tmp_path = os.path.join(UP_DIR, tmp_path)
-    if (not os.path.exists(tmp_path)) or (not tmp_path.lower().endswith(".zip")):
-        raise HTTPException(status_code=404, detail="临时ZIP不存在")
+    tmp_zip = _safe_join_uploads(tmp)
+    if not (tmp_zip and os.path.exists(tmp_zip)):
+        def _err():
+            yield _sse({"phase":"error","msg":"临时ZIP不存在，请重新上传"})
+        return StreamingResponse(_err(), media_type="text/event-stream", headers={"Cache-Control":"no-cache"})
 
-    def sse_pack(obj): return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
-
-    async def gen() -> AsyncGenerator[str, None]:
+    def _stream():
         saved=0; skipped=0
         try:
-            yield sse_pack({"phase":"unzip", "msg":"开始解压…"})
-            with zipfile.ZipFile(tmp_path, "r") as z:
-                members = [m for m in z.namelist() if (not m.endswith("/")) and m.lower().endswith(".pdf")]
+            with zipfile.ZipFile(tmp_zip, "r") as z:
+                members = [m for m in z.namelist() if (m and not m.endswith("/") and m.lower().endswith(".pdf"))]
                 total = len(members)
-                yield sse_pack({"phase":"unzip", "total": total})
                 done = 0
+                yield _sse({"phase":"unzip","total": total, "done": done})
                 for m in members:
                     try:
                         tracking = canon_tracking(os.path.splitext(os.path.basename(m))[0])
                         if not tracking:
-                            skipped += 1; continue
+                            skipped += 1
+                            continue
                         target = os.path.join(PDF_DIR, f"{tracking}.pdf")
                         os.makedirs(os.path.dirname(target), exist_ok=True)
-                        with z.open(m) as src, open(target,"wb") as dst: shutil.copyfileobj(src,dst)
+                        with z.open(m) as src, open(target,"wb") as dst:
+                            shutil.copyfileobj(src, dst)
                         tf = db.get(TrackingFile, tracking)
                         if not tf:
                             tf = TrackingFile(tracking_no=tracking, file_path=target, uploaded_at=datetime.utcnow()); db.add(tf)
@@ -663,66 +634,42 @@ async def api_apply_pdf_import(request: Request, tmp: str = Query(...), db=Depen
                     except Exception:
                         skipped += 1
                     done += 1
-                    if done % 50 == 0 or done == total:
-                        yield sse_pack({"phase":"unzip", "done": done, "total": total})
-                        await asyncio.sleep(0)
+                    if done % 200 == 0:
+                        db.commit()
+                        yield _sse({"phase":"unzip","total": total, "done": done})
+                db.commit()
 
-            db.commit()
-            set_mapping_version(db); write_mapping_json(db)
-            yield sse_pack({"phase":"repack", "msg":"重建当日ZIP…"})
+            # 重建当日 ZIP
+            yield _sse({"phase":"repack","msg":"重建当日归档ZIP…"})
             try:
-                build_daily_pdf_zip(db, datetime.utcnow().date())
-            except Exception as e:
-                yield sse_pack({"phase":"repack", "warn": f"重建ZIP失败：{e}"})
+                fp_zip = build_daily_pdf_zip(db, datetime.utcnow().date())
+                if os.path.exists(fp_zip):
+                    # 如果 sidecar 还没有 SHA，尽量写一个
+                    if not _read_sidecar_sha(fp_zip):
+                        try:
+                            h=hashlib.sha256()
+                            with open(fp_zip, "rb") as f:
+                                for chunk in iter(lambda: f.read(1024*1024), b""):
+                                    h.update(chunk)
+                            _write_sidecar_sha(fp_zip, h.hexdigest())
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
-            try: os.remove(tmp_path)
+            set_mapping_version(db); write_mapping_json(db)
+
+            # 删除临时文件
+            try: os.remove(tmp_zip)
             except Exception: pass
 
-            yield sse_pack({"phase":"done", "ok": True, "saved": saved, "skipped": skipped,
-                            "redirect": f"/admin/files?ok={saved}&skipped={skipped}"})
+            yield _sse({"phase":"done","saved": saved, "skipped": skipped, "redirect": "/admin/files"})
         except Exception as e:
-            yield sse_pack({"phase":"error", "ok": False, "msg": str(e)})
+            db.rollback()
+            yield _sse({"phase":"error","msg": f"处理失败：{e}"})
+    return StreamingResponse(_stream(), media_type="text/event-stream", headers={"Cache-Control":"no-cache"})
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
-
-# （保留原同步方式作为兜底）
-@app.post("/admin/upload-pdf")
-async def upload_pdf_zip(request: Request, zipfile_upload: UploadFile = File(...), db=Depends(get_db)):
-    require_admin(request, db)
-    tmp_zip = os.path.join(UP_DIR, f"pdfs-{int(time.time())}-{re.sub(r'[^A-Za-z0-9_.-]+','_',zipfile_upload.filename)}")
-    with open(tmp_zip, "wb") as f:
-        f.write(await zipfile_upload.read())
-    saved=0; skipped=0
-    try:
-        with zipfile.ZipFile(tmp_zip, "r") as z:
-            for m in z.namelist():
-                if m.endswith("/") or not m.lower().endswith(".pdf"): continue
-                tracking = canon_tracking(os.path.splitext(os.path.basename(m))[0])
-                if not tracking: skipped += 1; continue
-                target = os.path.join(PDF_DIR, f"{tracking}.pdf")
-                os.makedirs(os.path.dirname(target), exist_ok=True)
-                with z.open(m) as src, open(target,"wb") as dst: shutil.copyfileobj(src,dst)
-                tf = db.get(TrackingFile, tracking)
-                if not tf:
-                    tf = TrackingFile(tracking_no=tracking, file_path=target, uploaded_at=datetime.utcnow()); db.add(tf)
-                else:
-                    tf.file_path = target; tf.uploaded_at = datetime.utcnow()
-                saved += 1
-        db.commit()
-        try:
-            build_daily_pdf_zip(db, datetime.utcnow().date())
-        except Exception:
-            pass
-        set_mapping_version(db); write_mapping_json(db)
-    except Exception as e:
-        db.rollback()
-        return PlainTextResponse(f"处理失败：{e}", status_code=500)
-    finally:
-        try: os.remove(tmp_zip)
-        except Exception: pass
-    return RedirectResponse(f"/admin/files?ok={saved}&skipped={skipped}", status_code=302)
-
-# ---- 文件/订单列表与清理 ----
+# ------------------ 文件/订单列表与批量操作 ------------------
 @app.get("/admin/files", response_class=HTMLResponse)
 def list_files(request: Request, q: Optional[str]=None, page: int=1, db=Depends(get_db)):
     require_admin(request, db); cleanup_expired(db)
@@ -839,7 +786,7 @@ def settings_save(request: Request,
     cleanup_expired(db)
     return RedirectResponse("/admin", status_code=302)
 
-# ---- 磁盘对齐 ----
+# ---- 对齐：后台列表 ≡ 磁盘 pdfs/ ----
 @app.post("/admin/reconcile")
 def admin_reconcile(request: Request, db=Depends(get_db)):
     require_admin(request, db)
@@ -866,6 +813,17 @@ def admin_reconcile(request: Request, db=Depends(get_db)):
     set_mapping_version(db); write_mapping_json(db)
     return RedirectResponse(f"/admin/files?reconciled=1&added={added}&renamed={renamed}&dropped={drop}", status_code=302)
 
+# ------------------ ZIP 列表（一级菜单页） ------------------
+@app.get("/admin/zips", response_class=HTMLResponse)
+def admin_zip_list(request: Request, db=Depends(get_db)):
+    require_admin(request, db)
+    rows = list_pdf_zip_dates()
+    # 模板存在则渲染，否则直接给 JSON 以保证可用
+    tpl_path = os.path.join(TEMPLATE_ROOT, "zips.html")
+    if os.path.exists(tpl_path):
+        return templates.TemplateResponse("zips.html", {"request": request, "rows": rows})
+    return JSONResponse({"rows": rows})
+
 # ------------------ API（客户端使用） ------------------
 @app.get("/api/v1/version")
 def api_version(code: str = Query(""), db=Depends(get_db)):
@@ -884,6 +842,7 @@ def api_mapping(code: str = Query(""), db=Depends(get_db)):
     if not c: raise HTTPException(status_code=403, detail="invalid code")
     return _build_mapping_payload(db)
 
+# 单个PDF下载（大小写不敏感兜底）
 @app.get("/api/v1/file/{tracking_no}")
 def api_file(tracking_no: str, code: str = Query(""), db=Depends(get_db)):
     c = verify_code(db, code)
@@ -901,49 +860,70 @@ def api_file(tracking_no: str, code: str = Query(""), db=Depends(get_db)):
     if not fp: raise HTTPException(status_code=404, detail="file not found")
     return FileResponse(fp, media_type="application/pdf", filename=os.path.basename(fp))
 
-@app.get("/api/v1/runtime/sumatra")
-def api_runtime_sumatra(arch: str = "win64", code: str = Query(""), db=Depends(get_db)):
+# 列表：已有归档日期
+@app.get("/api/v1/pdf-zips/dates")
+def api_pdf_zip_dates(code: str = Query(""), db=Depends(get_db)):
     c = verify_code(db, code)
     if not c: raise HTTPException(status_code=403, detail="invalid code")
-    fname = "SumatraPDF-3.5.2-64.exe" if arch=="win64" else "SumatraPDF-3.5.2-32.exe"
-    fp = os.path.join(BASE_DIR, "runtime", fname)
-    if not os.path.exists(fp): raise HTTPException(status_code=404, detail="runtime not found on server")
-    return FileResponse(fp, media_type="application/octet-stream", filename=fname)
+    dates_db=set()
+    try:
+        rows=db.query(TrackingFile.uploaded_at).all()
+        for (u,) in rows:
+            if not u: continue
+            dstr=u.strftime("%Y-%m-%d")
+            dates_db.add(dstr)
+    except Exception:
+        pass
+    lst=list_pdf_zip_dates()
+    dates_zip={x.get("date") for x in lst}
+    for d in sorted(dates_db):
+        if d not in dates_zip:
+            lst.append({"date": d, "zip_name": f"pdfs-{d.replace('-','')}.zip", "size": 0})
+    try:
+        today=datetime.utcnow().date()
+        if today.strftime("%Y-%m-%d") in dates_db:
+            build_daily_pdf_zip(db, today)
+    except Exception:
+        pass
+    try:
+        lst.sort(key=lambda x: x.get("date",""), reverse=True)
+    except Exception:
+        pass
+    return {"dates": lst}
 
-# ---- 访问码校验/清理 ----
-def is_locked(c: ClientAuth) -> bool:
-    return bool(c.locked_until and datetime.utcnow() < c.locked_until)
+# 下载：某日 ZIP（支持 ETag / If-None-Match；带 X-Checksum-Sha256）
+@app.get("/api/v1/pdf-zips/daily")
+def api_pdf_zip_daily(request: Request, date: Optional[str] = Query(None), code: str = Query(""), db=Depends(get_db)):
+    c = verify_code(db, code)
+    if not c: raise HTTPException(status_code=403, detail="invalid code")
+    if not date:
+        d = datetime.utcnow().date()
+    else:
+        s=str(date).strip()
+        if re.fullmatch(r"\d{8}", s):
+            d=datetime(int(s[0:4]), int(s[4:6]), int(s[6:8])).date()
+        elif re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+            d=datetime(int(s[0:4]), int(s[5:7]), int(s[8:10])).date()
+        else:
+            raise HTTPException(status_code=400, detail="invalid date")
+    fp = os.path.join(ZIP_DIR, f"pdfs-{_date_str_compact(d)}.zip")
+    if not os.path.exists(fp):
+        try:
+            fp = build_daily_pdf_zip(db, d)
+        except Exception:
+            pass
+    if not os.path.exists(fp):
+        raise HTTPException(status_code=404, detail="zip not found")
 
-def verify_code(db, code: str):
-    if not code or not code.isdigit() or len(code)!=6: return None
-    rows = db.execute(select(ClientAuth).where(ClientAuth.is_active==True)).scalars().all()
-    for c in rows:
-        if is_locked(c): continue
-        if (c.code_plain == code) or (c.code_hash and bcrypt.verify(code, c.code_hash)):
-            c.last_used = datetime.utcnow(); c.fail_count = 0; c.locked_until=None; db.commit(); return c
-    for c in rows:
-        c.fail_count = (c.fail_count or 0) + 1
-        if c.fail_count >= 5: c.locked_until = datetime.utcnow() + timedelta(minutes=5)
-    db.commit(); return None
+    # 生成弱 ETag（mtime + size）
+    st = os.stat(fp)
+    etag = f'W/"{int(st.st_mtime)}-{st.st_size}"'
+    inm = request.headers.get("if-none-match")
+    if inm and inm.strip() == etag:
+        return PlainTextResponse("", status_code=304, headers={"ETag": etag})
 
-def cleanup_expired(db):
-    o_days = int(get_kv(db, 'retention_orders_days', '0') or '0')
-    f_days = int(get_kv(db, 'retention_files_days', '0') or '0')
-    if o_days > 0:
-        dt = datetime.utcnow() - timedelta(days=o_days)
-        db.query(OrderMapping).filter(OrderMapping.updated_at < dt).delete()
-    if f_days > 0:
-        dt = datetime.utcnow() - timedelta(days=f_days)
-        olds = db.query(TrackingFile).filter(TrackingFile.uploaded_at < dt).all()
-        for r in olds:
-            try:
-                if r.file_path and os.path.exists(r.file_path): os.remove(r.file_path)
-            except Exception:
-                pass
-            db.delete(r)
-    db.commit()
-
-# ---- 路由表自检（调试用，可保留） ----
-@app.get("/__routes__")
-def __routes__():
-    return [{"path": r.path, "methods": list(getattr(r, "methods", []))} for r in app.routes]
+    headers = {"ETag": etag}
+    sha = _read_sidecar_sha(fp)
+    if sha:
+        headers["X-Checksum-Sha256"] = sha
+    return FileResponse(fp, media_type="application/zip", filename=os.path.basename(fp), headers=headers)
