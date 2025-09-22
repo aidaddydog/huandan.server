@@ -1,60 +1,52 @@
-<!-- app/templates/preview_orders.html -->
-<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8"/>
-  <title>导入订单 - 预览与确认</title>
-  <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;padding:16px}
-    table{border-collapse:collapse;width:100%}
-    th,td{border-bottom:1px solid #eee;padding:6px;text-align:left}
-    .btn{display:inline-block;padding:8px 14px;border:1px solid #333;background:#111;color:#fff;border-radius:4px;text-decoration:none;cursor:pointer}
-    .bar{height:8px;background:#eee;border-radius:4px;overflow:hidden;margin-top:8px}
-    .bar>i{display:block;height:100%;background:#111;width:0%}
-    .small{font-size:12px;color:#666}
-  </style>
-</head>
+<!doctype html><html><head><meta charset="utf-8"><title>订单导入预览</title></head>
 <body>
-  <h2>导入订单 - 预览与确认</h2>
-  <p>以下为前 50 行预览：</p>
-  <table>
-    <thead><tr><th>订单号</th><th>运单号</th></tr></thead>
-    <tbody>
-      {% for row in rows %}
-      <tr><td>{{ row[0] }}</td><td>{{ row[1] }}</td></tr>
-      {% endfor %}
-    </tbody>
+{% include "_nav.html" %}
+<div style="padding:16px;max-width:900px">
+  <h2>导入预览（前50行）</h2>
+  <table border="1" cellspacing="0" cellpadding="4">
+    <tr><th>订单号</th><th>运单号</th></tr>
+    {% for r in rows %}
+      <tr><td>{{ r[0] }}</td><td>{{ r[1] }}</td></tr>
+    {% endfor %}
   </table>
-
-  <p><button class="btn" onclick="commit()">确认写入</button></p>
-  <div class="bar"><i id="bar"></i></div>
-  <p id="txt" class="small">等待执行...</p>
-
+  <div style="margin-top:12px">
+    <button id="btn">确认导入</button>
+  </div>
+  <pre id="log" style="margin-top:12px;background:#f7f7f7;padding:10px;height:220px;overflow:auto"></pre>
+</div>
 <script>
-async function newProgress(tag){
-  const r = await fetch("/admin/progress/new?tag="+encodeURIComponent(tag));
-  const j = await r.json(); return j.id;
-}
-async function commit(){
-  const pid = await newProgress("import_orders");
-  const fd = new FormData();
-  fd.append("progress_id", pid);
-  const resp = await fetch("/admin/upload-orders-step3", {method:"POST", body:fd});
-  if(!resp.ok){ alert("提交失败"); return; }
-  // 跟进进度
-  const bar=document.getElementById("bar");
-  const txt=document.getElementById("txt");
-  while(true){
-    const r=await fetch("/admin/progress/get?id="+pid,{cache:"no-store"});
-    const s=await r.json();
-    if(s.missing){ txt.textContent="任务不存在"; return; }
-    bar.style.width = (s.pct||0)+"%";
-    txt.textContent = (s.stage||"-")+"："+(s.note||"")+"（"+(s.pct||0)+"%）";
-    if(s.done){ break; }
-    await new Promise(r=>setTimeout(r,800));
+const $ = s=>document.querySelector(s);
+const log = m => { const pre=$("#log"); pre.textContent += m+"\n"; pre.scrollTop = pre.scrollHeight; };
+const btn = $("#btn");
+btn.addEventListener("click", async () => {
+  btn.disabled = true; const old = btn.textContent; btn.textContent = "导入中… ⏳";
+  $("#log").textContent = "";
+  try {
+    await new Promise((resolve, reject) => {
+      const es = new EventSource("/admin/api/orders-apply");
+      es.onmessage = (ev) => {
+        const d = JSON.parse(ev.data);
+        if (d.phase === "read") {
+          log("读取完成，待导入总数："+d.total);
+        } else if (d.phase === "progress") {
+          log(`写入进度：${d.done}/${d.total}`);
+        } else if (d.phase === "done") {
+          log(`导入完成：${d.count}`);
+          es.close();
+          alert("导入成功！");
+          window.location.href = d.redirect || "/admin/orders";
+          resolve();
+        } else if (d.phase === "error") {
+          es.close(); reject(new Error(d.msg || "导入失败"));
+        }
+      };
+      es.onerror = () => { es.close(); reject(new Error("SSE 连接中断")); };
+    });
+  } catch(e) {
+    alert(e.message || e);
+  } finally {
+    btn.disabled = false; btn.textContent = old;
   }
-  txt.textContent = "完成："+txt.textContent;
-}
+});
 </script>
-</body>
-</html>
+</body></html>
